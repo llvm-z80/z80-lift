@@ -1,0 +1,33 @@
+// The instruction lists as enums, private to core.
+
+#ifndef Z80CORE_INSNS_H
+#define Z80CORE_INSNS_H
+
+#include "z80core/Decoder.h"
+
+#include <string>
+
+namespace z80core {
+
+namespace z80 {
+enum Op : unsigned {
+#define INST(Name, Kind) Name,
+#include "Z80/Insns.def"
+  NumOps
+};
+} // namespace z80
+
+namespace sm83 {
+enum Op : unsigned {
+#define INST(Name, Kind) Name,
+#include "SM83/Insns.def"
+  NumOps
+};
+} // namespace sm83
+
+bool decodeZ80(const uint8_t *Mem, uint16_t Addr, Inst &I, std::string *Text);
+bool decodeSM83(const uint8_t *Mem, uint16_t Addr, Inst &I, std::string *Text);
+
+} // namespace z80core
+
+#endif // Z80CORE_INSNS_H

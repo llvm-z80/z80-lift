@@ -1,0 +1,69 @@
+// SM83 instructions the decoder recognizes, as an X-macro list. Each entry
+// names the semantics function sm83_<Name> and how the instruction leaves.
+//
+// Arguments a, b, c are listed per entry. An 8-bit operand is a selector from
+// R8 in SM83/Semantics.cpp and a 16-bit register one from R16. Jump and call
+// targets are absolute; e is a signed byte.
+
+#ifndef INST
+#error "define INST(Name, Kind) before including SM83/Insns.def"
+#endif
+
+INST(NOP, Seq)
+INST(LD_R8_R8, Seq)    // dst, src
+INST(LD_R8_N, Seq)     // dst, n
+INST(LD_R16_NN, Seq)   // rr, nn
+INST(LD_MR16_A, Seq)   // rr (BC or DE)
+INST(LD_A_MR16, Seq)   // rr (BC or DE)
+INST(LD_MHLI_A, Seq)
+INST(LD_MHLD_A, Seq)
+INST(LD_A_MHLI, Seq)
+INST(LD_A_MHLD, Seq)
+INST(LD_MNN_SP, Seq)   // nn
+INST(LD_MNN_A, Seq)    // nn
+INST(LD_A_MNN, Seq)    // nn
+INST(LDH_MN_A, Seq)    // n
+INST(LDH_A_MN, Seq)    // n
+INST(LDH_MC_A, Seq)
+INST(LDH_A_MC, Seq)
+INST(LD_HL_SPE, Seq)   // e
+INST(LD_SP_HL, Seq)
+INST(ADD_SP_E, Seq)    // e
+INST(PUSH, Seq)        // rr
+INST(POP, Seq)         // rr
+INST(ALU_R8, Seq)      // op, src
+INST(ALU_N, Seq)       // op, n
+INST(INC_R8, Seq)      // r
+INST(DEC_R8, Seq)      // r
+INST(INC_R16, Seq)     // rr
+INST(DEC_R16, Seq)     // rr
+INST(ADD_HL_R16, Seq)  // rr
+INST(RLCA, Seq)
+INST(RRCA, Seq)
+INST(RLA, Seq)
+INST(RRA, Seq)
+INST(ROT, Seq)         // op, r
+INST(BIT, Seq)         // bit, r
+INST(RES, Seq)         // bit, r
+INST(SET, Seq)         // bit, r
+INST(DAA, Seq)
+INST(CPL, Seq)
+INST(SCF, Seq)
+INST(CCF, Seq)
+INST(DI, Seq)
+INST(EI, Seq)
+INST(JP, Jump)         // target
+INST(JP_CC, CondJump)  // cc, target
+INST(JR, Jump)         // target
+INST(JR_CC, CondJump)  // cc, target
+INST(JP_HL, JumpInd)
+INST(CALL, Call)       // target
+INST(CALL_CC, CondCall) // cc, target
+INST(RST, Call)        // target
+INST(RET, Ret)
+INST(RET_CC, CondRet)  // cc
+INST(RETI, Ret)
+INST(HALT, Halt)
+INST(STOP, Halt)
+
+#undef INST

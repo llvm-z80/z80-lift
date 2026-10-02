@@ -1,0 +1,83 @@
+// Z80 instructions the decoder recognizes, as an X-macro list. Each entry
+// names the semantics function z80_<Name> and how the instruction leaves.
+//
+// Arguments a, b, c are listed per entry. An 8-bit operand is a selector from
+// R8 in Z80/Semantics.cpp plus a displacement for (IX+d) and (IY+d); a 16-bit
+// register is a selector from R16. Jump and call targets are absolute.
+
+#ifndef INST
+#error "define INST(Name, Kind) before including Z80/Insns.def"
+#endif
+
+INST(NOP, Seq)
+INST(LD_R8_R8, Seq)    // dst, src, disp
+INST(LD_R8_N, Seq)     // dst, n, disp
+INST(LD_R16_NN, Seq)   // rr, nn
+INST(LD_R16_MNN, Seq)  // rr, nn
+INST(LD_MNN_R16, Seq)  // rr, nn
+INST(LD_A_MNN, Seq)    // nn
+INST(LD_MNN_A, Seq)    // nn
+INST(LD_A_MR16, Seq)   // rr (BC or DE)
+INST(LD_MR16_A, Seq)   // rr (BC or DE)
+INST(LD_SP_R16, Seq)   // rr
+INST(LD_A_I, Seq)
+INST(LD_A_R, Seq)
+INST(LD_I_A, Seq)
+INST(LD_R_A, Seq)
+INST(PUSH, Seq)        // rr
+INST(POP, Seq)         // rr
+INST(EX_DE_HL, Seq)
+INST(EX_AF, Seq)
+INST(EXX, Seq)
+INST(EX_MSP_R16, Seq)  // rr
+INST(ALU_R8, Seq)      // op, src, disp
+INST(ALU_N, Seq)       // op, n
+INST(INC_R8, Seq)      // r, disp
+INST(DEC_R8, Seq)      // r, disp
+INST(INC_R16, Seq)     // rr
+INST(DEC_R16, Seq)     // rr
+INST(ADD_R16, Seq)     // dst, src
+INST(ADC_HL, Seq)      // rr
+INST(SBC_HL, Seq)      // rr
+INST(RLCA, Seq)
+INST(RRCA, Seq)
+INST(RLA, Seq)
+INST(RRA, Seq)
+INST(ROT, Seq)         // op, r, disp
+INST(BIT, Seq)         // bit, r, disp
+INST(RES, Seq)         // bit, r, disp
+INST(SET, Seq)         // bit, r, disp
+INST(DAA, Seq)
+INST(CPL, Seq)
+INST(NEG, Seq)
+INST(CCF, Seq)
+INST(SCF, Seq)
+INST(RLD, Seq)
+INST(RRD, Seq)
+INST(LDI, Seq)
+INST(LDD, Seq)
+INST(LDIR, CondJump)   // itself: repeats by jumping back
+INST(LDDR, CondJump)   // itself
+INST(CPI, Seq)
+INST(CPD, Seq)
+INST(CPIR, CondJump)   // itself
+INST(CPDR, CondJump)   // itself
+INST(DI, Seq)
+INST(EI, Seq)
+INST(IM, Seq)          // mode
+INST(JP, Jump)         // target
+INST(JP_CC, CondJump)  // cc, target
+INST(JR, Jump)         // target
+INST(JR_CC, CondJump)  // cc, target
+INST(DJNZ, CondJump)   // target
+INST(JP_R16, JumpInd)  // rr
+INST(CALL, Call)       // target
+INST(CALL_CC, CondCall) // cc, target
+INST(RST, Call)        // target
+INST(RET, Ret)
+INST(RET_CC, CondRet)  // cc
+INST(RETI, Ret)
+INST(RETN, Ret)
+INST(HALT, Halt)
+
+#undef INST
