@@ -32,6 +32,10 @@ Expected<std::unique_ptr<Lifter>> Lifter::create(Cpu C, const Image &Img,
     F.setLinkage(GlobalValue::InternalLinkage);
     F.removeFnAttr(Attribute::NoInline);
     F.addFnAttr(Attribute::AlwaysInline);
+    // Lifted functions have no target attributes, and inlining needs a match.
+    F.removeFnAttr("target-cpu");
+    F.removeFnAttr("target-features");
+    F.removeFnAttr("tune-cpu");
   }
 
   auto Get = [&](StringRef Name) -> Expected<llvm::Function *> {
@@ -94,7 +98,7 @@ Error Lifter::buildBody(const CFG &F, llvm::Function *Fn) {
   std::map<uint16_t, BasicBlock *> BBs;
   for (const auto &[A, Blk] : F.Blocks)
     BBs[A] = BasicBlock::Create(Ctx, formatv("b{0:x-4}", A).str(), Fn);
-  BranchInst::Create(BBs.at(F.Entry), EntryBB);
+  IRBuilder<>(EntryBB).CreateBr(BBs.at(F.Entry));
 
   // A block of this function, or a tail call into another one.
   auto Succ = [&](uint16_t A) -> Expected<BasicBlock *> {

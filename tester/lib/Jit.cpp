@@ -1,4 +1,4 @@
-// JIT-compiles lifted functions and the references with ORC.
+// JIT-compiles lifted functions and the contracts with ORC.
 
 #include "z80tester/Jit.h"
 
@@ -50,44 +50,52 @@ void emitAdapter(llvm::Function &F) {
 
 } // namespace
 
-Expected<std::map<std::string, RefSig>>
-Jit::addRefs(ArrayRef<std::string> Names) {
+Expected<std::map<std::string, Signature>>
+Jit::addBitcode(MemoryBufferRef Bitcode, ArrayRef<std::string> Adapt,
+                ArrayRef<std::string> Signatures) {
   auto Ctx = std::make_unique<LLVMContext>();
-  auto Refs = parseBitcodeFile(MemoryBufferRef(refsBitcode(), "refs"), *Ctx);
-  if (!Refs)
-    return Refs.takeError();
-  Module &M = **Refs;
+  auto M = parseBitcodeFile(Bitcode, *Ctx);
+  if (!M)
+    return M.takeError();
 
-  std::map<std::string, RefSig> Sigs;
-  for (const std::string &Name : Names) {
-    llvm::Function *Ref = M.getFunction("ref_" + Name);
-    if (!Ref || Ref->isDeclaration())
-      return createStringError("refs/ has no ref_%s", Name.c_str());
-    RefSig Sig;
-    for (Type *P : Ref->getFunctionType()->params()) {
+  auto Get = [&](StringRef Name) -> Expected<llvm::Function *> {
+    llvm::Function *F = (*M)->getFunction(Name);
+    if (!F || F->isDeclaration())
+      return createStringError("%s: no function %s",
+                               Bitcode.getBufferIdentifier().str().c_str(),
+                               Name.str().c_str());
+    return F;
+  };
+
+  std::map<std::string, Signature> Sigs;
+  for (const std::string &Name : Signatures) {
+    auto F = Get(Name);
+    if (!F)
+      return F.takeError();
+    Signature Sig;
+    for (Type *P : (*F)->getFunctionType()->params()) {
       std::optional<Ty> T = tyFromIR(P);
       if (!T)
-        return createStringError("ref_%s: unsupported parameter type",
+        return createStringError("%s: unsupported parameter type",
                                  Name.c_str());
       Sig.Params.push_back(*T);
     }
-    if (!Ref->getReturnType()->isVoidTy()) {
-      Sig.Ret = tyFromIR(Ref->getReturnType());
+    if (!(*F)->getReturnType()->isVoidTy()) {
+      Sig.Ret = tyFromIR((*F)->getReturnType());
       if (!Sig.Ret)
-        return createStringError("ref_%s: unsupported result type",
-                                 Name.c_str());
-    }
-    emitAdapter(*Ref);
-    if (llvm::Function *Pre = M.getFunction("pre_" + Name);
-        Pre && !Pre->isDeclaration()) {
-      Sig.HasPre = true;
-      emitAdapter(*Pre);
+        return createStringError("%s: unsupported result type", Name.c_str());
     }
     Sigs[Name] = Sig;
   }
+  for (const std::string &Name : Adapt) {
+    auto F = Get(Name);
+    if (!F)
+      return F.takeError();
+    emitAdapter(**F);
+  }
 
-  if (Error E = J->addIRModule(
-          orc::ThreadSafeModule(std::move(*Refs), std::move(Ctx))))
+  if (Error E =
+          J->addIRModule(orc::ThreadSafeModule(std::move(*M), std::move(Ctx))))
     return std::move(E);
   return Sigs;
 }
@@ -104,15 +112,8 @@ Expected<LiftedFn> Jit::lifted(StringRef Name) {
   return Addr->toPtr<LiftedFn>();
 }
 
-Expected<AdapterFn> Jit::ref(StringRef Name) {
-  auto Addr = J->lookup(("z80tester.adapt.ref_" + Name).str());
-  if (!Addr)
-    return Addr.takeError();
-  return Addr->toPtr<AdapterFn>();
-}
-
-Expected<AdapterFn> Jit::pre(StringRef Name) {
-  auto Addr = J->lookup(("z80tester.adapt.pre_" + Name).str());
+Expected<AdapterFn> Jit::adapter(StringRef Name) {
+  auto Addr = J->lookup(("z80tester.adapt." + Name).str());
   if (!Addr)
     return Addr.takeError();
   return Addr->toPtr<AdapterFn>();

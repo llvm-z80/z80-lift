@@ -55,25 +55,6 @@ std::optional<Ty> z80tester::tyFromIR(Type *T) {
   return std::nullopt;
 }
 
-std::optional<std::vector<Reg8>> z80tester::parseRegs(StringRef S) {
-  std::vector<Reg8> Regs;
-  for (char C : S.upper()) {
-    switch (C) {
-    case 'A': Regs.push_back(RA); break;
-    case 'B': Regs.push_back(RB); break;
-    case 'C': Regs.push_back(RC); break;
-    case 'D': Regs.push_back(RD); break;
-    case 'E': Regs.push_back(RE); break;
-    case 'H': Regs.push_back(RH); break;
-    case 'L': Regs.push_back(RL); break;
-    default: return std::nullopt;
-    }
-  }
-  if (Regs.empty())
-    return std::nullopt;
-  return Regs;
-}
-
 namespace {
 
 /// The register table of one target's __sdcccall(1).

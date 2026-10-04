@@ -7,7 +7,6 @@
 #include "z80core/Decoder.h"
 
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 
 #include <optional>
@@ -27,9 +26,6 @@ const char *tyName(Ty T);
 std::optional<Ty> tyFromIR(llvm::Type *T);
 
 enum Reg8 : uint8_t { RA, RB, RC, RD, RE, RH, RL };
-
-/// Parses a register list such as "HL" or "DEBC", most significant byte first.
-std::optional<std::vector<Reg8>> parseRegs(llvm::StringRef S);
 
 /// A value in registers, most significant byte first, or in the stack
 /// arguments at Offset bytes above the return address.

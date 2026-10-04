@@ -53,17 +53,20 @@ Expected<Image> Image::load(StringRef Path) {
         !ExecSections.count((*Sec)->getIndex()))
       continue;
 
-    uint16_t A = *Addr;
-    bool Global = *Flags & object::SymbolRef::SF_Global;
-    Img.Addrs.emplace(Name->str(), A);
-    if (Global) {
-      Img.Entries.insert(A);
-      Img.Names[A] = Name->str();
-    } else if (!Img.Names.count(A)) {
-      Img.Names[A] = Name->str();
-    }
+    Img.addSymbol(*Name, *Addr, *Flags & object::SymbolRef::SF_Global);
   }
   return Img;
+}
+
+void Image::addSymbol(StringRef Name, uint16_t Addr, bool Global) {
+  Addrs.emplace(Name.str(), Addr);
+  if (Global) {
+    Entries.insert(Addr);
+    Globals.insert(Name.str());
+    Names[Addr] = Name.str();
+  } else if (!Names.count(Addr)) {
+    Names[Addr] = Name.str();
+  }
 }
 
 std::optional<uint16_t> Image::lookup(StringRef Name) const {

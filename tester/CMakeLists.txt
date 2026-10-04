@@ -1,19 +1,30 @@
-# Runs lifted runtime functions against reference implementations.
+# Runs lifted runtime functions against the contracts in their assembly.
 
-z80lift_add_bitcode(z80tester-refs-bc
-  NAMESPACE z80tester
-  FUNCTION refsBitcode
-  SOURCES refs/Int.c refs/Float.c
-  FLAGS -std=c11)
+option(Z80LIFT_TESTER_ASSEMBLER
+  "Let z80-tester assemble the runtime's sources; needs LLVM's Z80 target" OFF)
 
-add_library(z80tester STATIC
+set(sources
   lib/CallConv.cpp
+  lib/Contract.cpp
   lib/Jit.cpp
-  lib/Spec.cpp
   lib/Tester.cpp)
+set(components Core BitReader OrcJIT native)
+if(Z80LIFT_TESTER_ASSEMBLER)
+  if(NOT "Z80" IN_LIST LLVM_TARGETS_TO_BUILD)
+    message(FATAL_ERROR "Z80LIFT_TESTER_ASSEMBLER needs an LLVM built with "
+      "the Z80 target, such as llvm-z80's; ${LLVM_DIR} has "
+      "${LLVM_TARGETS_TO_BUILD}")
+  endif()
+  list(APPEND sources lib/Assembler.cpp)
+  list(APPEND components MC MCParser Object Z80AsmParser Z80Desc Z80Info)
+endif()
 
-z80lift_llvm_libs(llvm_libs Core BitReader OrcJIT native)
+add_library(z80tester STATIC ${sources})
+z80lift_llvm_libs(llvm_libs ${components})
 target_include_directories(z80tester PUBLIC include)
-target_link_libraries(z80tester PUBLIC z80lift z80tester-refs-bc ${llvm_libs})
+target_link_libraries(z80tester PUBLIC z80lift ${llvm_libs})
+if(Z80LIFT_TESTER_ASSEMBLER)
+  target_compile_definitions(z80tester PUBLIC Z80TESTER_ASSEMBLER)
+endif()
 
 add_subdirectory(tools/z80-tester)

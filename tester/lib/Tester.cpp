@@ -1,6 +1,6 @@
-// Calls a runtime function the way compiled code does and compares it with
-// its reference. Registers that carry no argument start out random, so
-// reading one shows up as a mismatch.
+// Calls a runtime function the way compiled code does and checks its contract.
+// Registers that carry no argument start out random, so reading one shows up
+// as a broken condition.
 
 #include "z80tester/Tester.h"
 #include "z80core/Interp.h"
@@ -8,9 +8,11 @@
 #include "llvm/Support/FormatVariadic.h"
 
 #include <algorithm>
+#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <thread>
+#include <unistd.h>
 
 using namespace llvm;
 using namespace z80core;
@@ -132,30 +134,63 @@ std::string formatValue(Ty T, U128 V) {
   return S;
 }
 
-bool isNaN(Ty T, U128 V) {
-  if (T == Ty::F32)
-    return (uint32_t(V) & 0x7F800000u) == 0x7F800000u &&
-           (uint32_t(V) & 0x7FFFFF);
-  if (T == Ty::F16)
-    return (uint16_t(V) & 0x7C00) == 0x7C00 && (uint16_t(V) & 0x3FF);
-  return false;
+U128 regValue(const State &S, Reg R) {
+  switch (R) {
+  case Reg::A: return S.A;
+  case Reg::B: return S.B;
+  case Reg::C: return S.C;
+  case Reg::D: return S.D;
+  case Reg::E: return S.E;
+  case Reg::H: return S.H;
+  case Reg::L: return S.L;
+  case Reg::BC: return S.B << 8 | S.C;
+  case Reg::DE: return S.D << 8 | S.E;
+  case Reg::HL: return S.H << 8 | S.L;
+  case Reg::IX: return S.IXH << 8 | S.IXL;
+  case Reg::IY: return S.IYH << 8 | S.IYL;
+  case Reg::SP: return S.SP;
+  }
+  return 0;
 }
 
-int signOf(U128 V, unsigned Bytes) {
-  if (V == 0)
-    return 0;
-  return (V >> (Bytes * 8 - 1)) & 1 ? -1 : 1;
+// The part of a contract being evaluated, for reporting a trap on undefined
+// behaviour in it.
+thread_local const char *Evaluating = nullptr;
+
+extern "C" void onTrap(int) {
+  const char *W = Evaluating;
+  const char Head[] =
+      "z80-tester: error: undefined behaviour in the contract at ";
+  const char Other[] = "z80-tester: error: illegal instruction\n";
+  if (W) {
+    (void)!write(2, Head, sizeof Head - 1);
+    (void)!write(2, W, strlen(W));
+    (void)!write(2, "\n", 1);
+  } else {
+    (void)!write(2, Other, sizeof Other - 1);
+  }
+  _exit(2);
 }
 
-bool sameResult(const std::string &Mode, Ty T, unsigned Bytes, U128 Got,
-                U128 Want) {
-  if (Mode == "zero")
-    return (Got == 0) == (Want == 0);
-  if (Mode == "sign")
-    return signOf(Got, Bytes) == signOf(Want, Bytes);
-  if (isNaN(T, Got) && isNaN(T, Want))
-    return true;
-  return Got == Want;
+bool evaluate(const Check &C, const void *Slots) {
+  alignas(16) uint8_t Out[16] = {};
+  Evaluating = C.Where.c_str();
+  C.Fn(Slots, Out);
+  Evaluating = nullptr;
+  return Out[0];
+}
+
+struct ExampleValues {
+  std::string Where;
+  std::vector<std::pair<unsigned, U128>> Values;
+};
+
+unsigned inputBits(const std::vector<Ty> &Params) {
+  unsigned Bits = 0;
+  for (Ty T : Params)
+    if (T != Ty::Ptr)
+      Bits += sizeOf(T) * 8;
+  return Bits;
 }
 
 class Worker {
@@ -179,13 +214,31 @@ public:
           Bits >>= N;
         }
       } else {
-        for (size_t I = 0; I < P.Params.size(); ++I) {
-          const std::vector<U128> &Sp = Specials[I];
-          Vals[I] = G.next() % 4 == 0 ? Sp[G.next() % Sp.size()]
-                                      : G.next128() & mask(sizeOf(P.Params[I]));
-        }
+        draw(Vals);
       }
       callOnce(Vals);
+    }
+  }
+
+  /// Runs each example, drawing the values it leaves out again until
+  /// `requires` holds.
+  void runExamples(const std::vector<ExampleValues> &Examples) {
+    unsigned Givable =
+        llvm::count_if(P.Params, [](Ty T) { return T != Ty::Ptr; });
+    U128 Vals[MaxValues];
+    for (const ExampleValues &E : Examples) {
+      unsigned Tries = E.Values.size() == Givable ? 1 : 1000;
+      bool Met = false;
+      for (unsigned T = 0; T < Tries && !Met; ++T) {
+        draw(Vals);
+        for (const auto &[I, V] : E.Values)
+          Vals[I] = V;
+        Met = callOnce(Vals);
+      }
+      if (!Met) {
+        ++R.Mismatches;
+        report(Vals, E.Where + ": example does not meet requires");
+      }
     }
   }
 
@@ -210,6 +263,15 @@ private:
     R.Reports.push_back(S + "): " + What);
   }
 
+  /// Random inputs, often special ones.
+  void draw(U128 *Vals) {
+    for (size_t I = 0; I < P.Params.size(); ++I) {
+      const std::vector<U128> &Sp = Specials[I];
+      Vals[I] = G.next() % 4 == 0 ? Sp[G.next() % Sp.size()]
+                                  : G.next128() & mask(sizeOf(P.Params[I]));
+    }
+  }
+
   void randomize(State &S) {
     uint8_t *Regs[] = {&S.A,   &S.B,   &S.C,   &S.D,   &S.E,  &S.H,  &S.L,
                        &S.IXH, &S.IXL, &S.IYH, &S.IYL, &S.I,  &S.R,  &S.A2,
@@ -230,7 +292,9 @@ private:
     }
   }
 
-  void callOnce(const U128 *Vals) {
+  /// Calls the function and checks it; false if the inputs do not meet
+  /// `requires`.
+  bool callOnce(const U128 *Vals) {
     State S{};
     randomize(S);
     uint8_t *M = Mem.data();
@@ -295,130 +359,93 @@ private:
     if (!Problem.empty()) {
       ++R.Faults;
       report(Vals, Problem);
-      return;
+      return true;
     }
 
-    alignas(16) uint8_t Args[MaxValues + 4][16] = {};
-    uint8_t Extra[4][16] = {};
-    NumBuf = 0;
-    for (size_t I = 0; I < P.Params.size(); ++I) {
-      if (P.Params[I] == Ty::Ptr) {
-        void *Buf = HostBufs[NumBuf++];
-        std::memcpy(Args[I], &Buf, sizeof Buf);
-      } else {
-        std::memcpy(Args[I], &Vals[I], 16);
+    // Pointer arguments see the buffers as they were for `requires` and as
+    // the call left them for `ensures`.
+    uint8_t After[MaxValues][BufSize];
+    for (unsigned B = 0; B < NumBuf; ++B)
+      std::memcpy(After[B], &M[BufBase + (1 + B) * BufSize], BufSize);
+    auto PutParams = [&](uint8_t (*Slots)[16], uint8_t (*Bufs)[BufSize]) {
+      unsigned B = 0;
+      for (size_t I = 0; I < P.Params.size(); ++I) {
+        if (P.Params[I] == Ty::Ptr) {
+          void *Ptr = Bufs[B++];
+          std::memcpy(Slots[I], &Ptr, sizeof Ptr);
+        } else {
+          std::memcpy(Slots[I], &Vals[I], 16);
+        }
       }
-    }
-    size_t NumExtra = P.Results.empty() ? 0 : P.Results.size() - 1;
-    for (size_t K = 0; K < NumExtra; ++K) {
-      void *Buf = Extra[K];
-      std::memcpy(Args[P.Params.size() + K], &Buf, sizeof Buf);
-    }
+    };
 
-    if (P.Pre) {
-      alignas(16) uint8_t Ok[16] = {};
-      P.Pre(Args, Ok);
-      if (!Ok[0])
-        return;
+    if (P.Requires.Fn) {
+      alignas(16) uint8_t Slots[MaxValues][16] = {};
+      PutParams(Slots, HostBufs);
+      if (!evaluate(P.Requires, Slots))
+        return false;
     }
-    alignas(16) uint8_t Want[16] = {};
-    P.Ref(Args, Want);
     ++R.Checked;
 
-    std::string Diff;
-    if (P.Ret) {
-      unsigned Size = sizeOf(*P.Ret);
-      U128 Got;
-      if (!P.Results.empty())
-        Got = readRegs(S, P.Results[0]);
-      else if (L.SRet)
-        Got = readMem(M, BufBase, Size);
-      else
-        Got = readRegs(S, L.Ret->Regs);
-      U128 WantV;
-      std::memcpy(&WantV, Want, 16);
-      WantV &= mask(Size);
-      if (!sameResult(P.Compare, *P.Ret, Size, Got, WantV))
-        Diff = "got " + formatValue(*P.Ret, Got) + ", expected " +
-               formatValue(*P.Ret, WantV);
-    }
-    for (size_t K = 0; K < NumExtra && Diff.empty(); ++K) {
-      unsigned Size = P.Results[K + 1].size();
-      U128 Got = readRegs(S, P.Results[K + 1]), WantV;
-      std::memcpy(&WantV, Extra[K], 16);
-      WantV &= mask(Size);
-      if (Got != WantV)
-        Diff = formatv("result {0}: got {1}, expected {2}", K + 2,
-                       formatValue(Size == 1   ? Ty::I8
-                                   : Size == 2 ? Ty::I16
-                                               : Ty::I32,
-                                   Got),
-                       formatValue(Size == 1   ? Ty::I8
-                                   : Size == 2 ? Ty::I16
-                                               : Ty::I32,
-                                   WantV))
-                   .str();
-    }
-    NumBuf = 0;
-    for (size_t I = 0; I < P.Params.size() && Diff.empty(); ++I) {
-      if (P.Params[I] != Ty::Ptr)
+    U128 Result = 0;
+    if (P.Ret)
+      Result = L.SRet ? readMem(M, BufBase, sizeOf(*P.Ret))
+                      : readRegs(S, L.Ret->Regs);
+    for (const Check &E : P.Ensures) {
+      alignas(16) uint8_t Slots[1 + MaxValues + 13][16] = {};
+      unsigned N = 0;
+      if (P.Ret)
+        std::memcpy(Slots[N++], &Result, 16);
+      PutParams(Slots + N, After);
+      N += P.Params.size();
+      for (Reg Rg : E.Cond->Regs) {
+        U128 V = regValue(S, Rg);
+        std::memcpy(Slots[N++], &V, 16);
+      }
+      if (evaluate(E, Slots))
         continue;
-      unsigned Bytes = NumBuf < P.PtrBytes.size() ? P.PtrBytes[NumBuf] : 0;
-      uint16_t Addr = BufBase + (1 + NumBuf) * BufSize;
-      if (std::memcmp(&M[Addr], HostBufs[NumBuf], Bytes))
-        Diff =
-            formatv("parameter {0}: got {1}, expected {2}", I + 1,
-                    formatValue(Ty::I32, readMem(M, Addr, std::min(Bytes, 4u))),
-                    formatValue(Ty::I32, readMem(HostBufs[NumBuf], 0,
-                                                 std::min(Bytes, 4u))))
-                .str();
-      ++NumBuf;
-    }
-    if (!Diff.empty()) {
+
+      std::string What = E.Where + ": ensures " + E.Cond->Text;
+      if (P.Ret)
+        What += "; result=" + formatValue(*P.Ret, Result);
+      for (Reg Rg : E.Cond->Regs)
+        What +=
+            std::string(", ") + regName(Rg) + "=" +
+            formatValue(regBytes(Rg) == 1 ? Ty::I8 : Ty::I16, regValue(S, Rg));
       ++R.Mismatches;
-      report(Vals, Diff);
+      report(Vals, What);
+      return true;
     }
+    return true;
   }
 };
 
 } // namespace
 
 Expected<TestPlan> z80tester::planTest(Cpu C, const Image &Img,
-                                       const FunctionSpec &Spec,
-                                       const RefSig &Sig) {
+                                       const Contract &K,
+                                       const Signature &Sig) {
   TestPlan P;
   P.C = C;
-  P.Name = Spec.Name;
-  P.Compare = Spec.Compare;
-  P.PtrBytes = Spec.PtrBytes;
-  std::optional<uint16_t> Entry = Img.lookup(Spec.Name);
+  P.Name = K.Name;
+  std::optional<uint16_t> Entry = Img.lookup(K.Name);
   if (!Entry)
-    return createStringError("no function %s in the image", Spec.Name.c_str());
+    return createStringError("%s: no function %s in the image",
+                             K.where().c_str(), K.Name.c_str());
   P.Entry = *Entry;
   if (Img.End > WindowLo)
     return createStringError("the image reaches into the stack at 0x%04x",
                              WindowLo);
-
-  // Results after the first come back through trailing reference pointers.
-  size_t NumExtra = Spec.Results.empty() ? 0 : Spec.Results.size() - 1;
-  if (Sig.Params.size() < NumExtra)
-    return createStringError("%s: ref_%s lacks result pointers",
-                             Spec.Name.c_str(), Spec.refName().c_str());
-  P.Params.assign(Sig.Params.begin(), Sig.Params.end() - NumExtra);
+  P.Params = Sig.Params;
   P.Ret = Sig.Ret;
   if (P.Params.size() > MaxValues)
-    return createStringError("%s: too many parameters", Spec.Name.c_str());
-  for (const std::string &R : Spec.Results) {
-    auto Regs = parseRegs(R);
-    if (!Regs)
-      return createStringError("%s: bad register list %s", Spec.Name.c_str(),
-                               R.c_str());
-    P.Results.push_back(*Regs);
-  }
-
-  auto Layout =
-      layoutCall(C, Spec.Builtin ? CallConv::Builtin : CallConv::SDCCCall1,
-                 P.Params, P.Ret);
+    return createStringError("%s: too many parameters", K.where().c_str());
+  P.Exhaustive = K.Exhaustive;
+  P.Samples = K.Samples;
+  if (P.Exhaustive && inputBits(P.Params) >= 64)
+    return createStringError("%s: %u input bits are too many to try them all",
+                             K.where().c_str(), inputBits(P.Params));
+  auto Layout = layoutCall(C, CallConv::SDCCCall1, P.Params, P.Ret);
   if (!Layout)
     return Layout.takeError();
   P.Layout = *Layout;
@@ -427,12 +454,26 @@ Expected<TestPlan> z80tester::planTest(Cpu C, const Image &Img,
 
 TestResult z80tester::runTest(const TestPlan &P, const Image &Img,
                               const TestOptions &O) {
-  unsigned Bits = 0;
-  for (Ty T : P.Params)
-    if (T != Ty::Ptr)
-      Bits += sizeOf(T) * 8;
-  bool Exhaustive = Bits <= O.MaxExhaustiveBits;
-  uint64_t Total = Exhaustive ? uint64_t(1) << Bits : O.Samples;
+  std::signal(SIGILL, onTrap);
+  unsigned Bits = inputBits(P.Params);
+  bool Exhaustive = P.Exhaustive || (!P.Samples && Bits <= O.MaxExhaustiveBits);
+  uint64_t Total =
+      Exhaustive ? uint64_t(1) << Bits : P.Samples.value_or(O.Samples);
+
+  std::vector<ExampleValues> Examples;
+  for (const ExampleCheck &E : P.Examples) {
+    ExampleValues &EV = Examples.emplace_back();
+    EV.Where = E.Where;
+    for (const auto &[I, Fn] : E.Values) {
+      alignas(16) uint8_t Out[16] = {};
+      Evaluating = E.Where.c_str();
+      Fn(nullptr, Out);
+      Evaluating = nullptr;
+      U128 V;
+      std::memcpy(&V, Out, 16);
+      EV.Values.push_back({I, V & mask(sizeOf(P.Params[I]))});
+    }
+  }
 
   unsigned N = O.Threads ? O.Threads : std::thread::hardware_concurrency();
   N = unsigned(std::max<uint64_t>(1, std::min<uint64_t>(N, Total)));
@@ -441,7 +482,9 @@ TestResult z80tester::runTest(const TestPlan &P, const Image &Img,
   for (unsigned I = 0; I < N; ++I) {
     Workers.push_back(std::make_unique<Worker>(P, Img, O, I));
     uint64_t Begin = Total * I / N, End = Total * (I + 1) / N;
-    Threads.emplace_back([&W = *Workers.back(), Begin, End, Exhaustive] {
+    Threads.emplace_back([&, &W = *Workers.back(), I, Begin, End] {
+      if (I == 0)
+        W.runExamples(Examples);
       W.runRange(Begin, End, Exhaustive);
     });
   }
