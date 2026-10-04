@@ -56,7 +56,8 @@ The prototype is a C declaration with the function's C name, which is the
 assembler name without its leading underscore: `___udivhi3` is `__udivhi3`,
 and `_roundf` is `roundf`.
 
-The calling convention, `__sdcccall(1)`, is derived from the parameter and
+Unless the prototype places its values (see [Calling convention](#calling-convention)),
+the calling convention, `__sdcccall(1)`, is derived from the parameter and
 return types.
 
 Only types with the same size on the Z80 and on the host are accepted:
@@ -70,6 +71,25 @@ Only types with the same size on the Z80 and on the host are accepted:
 
 A pointer parameter points to a 32-byte buffer filled with random bytes. A
 parameter cannot be named after a register or `result`.
+
+## Calling convention
+
+A function outside `__sdcccall(1)` gives the place of every value in its
+prototype:
+
+```
+;@ uint32_t mul32(uint32_t a __reg(DEHL), uint32_t b __stack(0)) __reg(DEHL) __pops(4)
+```
+
+- `__reg(R)` after a parameter, or after the parameter list for the result,
+  names its registers, most significant first: `A` to `L`, `BC`, `DE` and
+  `HL`, as in `A`, `HL` or `DEHL`. They must hold exactly the value's size.
+- `__stack(N)` passes a parameter in the stack arguments, N bytes above the
+  return address.
+- `__pops(N)` after the parameter list means the function removes N bytes of
+  stack arguments before it returns. Without it, the caller removes them.
+
+Once one value has a place, every parameter and the result need one.
 
 ## Conditions
 

@@ -40,7 +40,7 @@ struct CallLayout {
   std::optional<Loc> Ret; // in registers, unless SRet
   bool SRet = false;      // result written through the first stack argument
   unsigned StackBytes = 0;
-  bool CalleeCleanup = false;
+  unsigned Popped = 0; // stack argument bytes the callee removes
 };
 
 enum class CallConv {

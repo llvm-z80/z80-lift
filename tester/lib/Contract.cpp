@@ -116,13 +116,66 @@ SmallVector<StringRef> splitArgs(StringRef S) {
   return Out;
 }
 
+/// Registers named one after another, most significant first, such as HLDE.
+Expected<std::vector<Reg>> parseRegs(StringRef S, const std::string &Where) {
+  std::vector<Reg> Regs;
+  S = S.trim();
+  while (!S.empty()) {
+    size_t Len =
+        S.starts_with("BC") || S.starts_with("DE") || S.starts_with("HL") ? 2
+        : strchr("ABCDEHL", S[0])                                         ? 1
+                                                                          : 0;
+    if (!Len)
+      return createStringError("%s: '%s' does not start with A to L, BC, DE "
+                               "or HL",
+                               Where.c_str(), S.str().c_str());
+    Regs.push_back(*regNamed(S.take_front(Len)));
+    S = S.drop_front(Len);
+  }
+  if (Regs.empty())
+    return createStringError("%s: __reg() names no register", Where.c_str());
+  return Regs;
+}
+
+/// Removes `Name(...)` from S and returns what was in the parentheses.
+std::optional<std::string> takeAttr(std::string &S, StringRef Name) {
+  size_t At = S.find((Name + "(").str());
+  if (At == std::string::npos)
+    return std::nullopt;
+  size_t Arg = At + Name.size() + 1, Close = S.find(')', Arg);
+  if (Close == std::string::npos)
+    return std::nullopt;
+  std::string Inside = S.substr(Arg, Close - Arg);
+  S.erase(At, Close + 1 - At);
+  return StringRef(Inside).trim().str();
+}
+
+Expected<unsigned> parseCount(StringRef S, StringRef Attr,
+                              const std::string &Where) {
+  unsigned N;
+  if (S.getAsInteger(0, N))
+    return createStringError("%s: %s needs a byte count", Where.c_str(),
+                             Attr.str().c_str());
+  return N;
+}
+
 Expected<Contract> parsePrototype(StringRef Text, StringRef File,
                                   unsigned Line) {
   std::string Where = (sys::path::filename(File) + ":" + Twine(Line)).str();
-  size_t Open = Text.find('('), Close = Text.rfind(')');
-  if (Open == StringRef::npos || Close == StringRef::npos || Close < Open ||
-      !Text.drop_front(Close + 1).trim().empty())
+  auto NotPrototype = [&] {
     return createStringError("%s: expected a C prototype", Where.c_str());
+  };
+  size_t Open = Text.find('('), Close = StringRef::npos;
+  for (size_t I = Open, Depth = 0; I < Text.size(); ++I) {
+    if (Text[I] == '(') {
+      ++Depth;
+    } else if (Text[I] == ')' && --Depth == 0) {
+      Close = I;
+      break;
+    }
+  }
+  if (Open == StringRef::npos || Close == StringRef::npos)
+    return NotPrototype();
 
   Contract K;
   StringRef Head = Text.take_front(Open).rtrim();
@@ -131,18 +184,89 @@ Expected<Contract> parsePrototype(StringRef Text, StringRef File,
     --NameStart;
   K.Name = Head.drop_front(NameStart).str();
   K.RetType = Head.take_front(NameStart).trim().str();
-  K.Params = Text.slice(Open + 1, Close).trim().str();
   K.File = File.str();
   K.Line = Line;
   if (K.Name.empty() || K.RetType.empty())
-    return createStringError("%s: expected a C prototype", Where.c_str());
+    return NotPrototype();
+
+  // The places of the result and of each parameter, if given.
+  std::string Tail = Text.drop_front(Close + 1).str();
+  std::optional<std::string> RetRegs = takeAttr(Tail, "__reg");
+  std::optional<std::string> Pops = takeAttr(Tail, "__pops");
+  if (!StringRef(Tail).trim().empty())
+    return createStringError("%s: unexpected '%s' after the parameters",
+                             Where.c_str(),
+                             StringRef(Tail).trim().str().c_str());
+  bool Placed = RetRegs || Pops;
+  if (RetRegs) {
+    auto Regs = parseRegs(*RetRegs, Where);
+    if (!Regs)
+      return Regs.takeError();
+    K.RetPlace = Place{*Regs, std::nullopt};
+  }
+  if (Pops) {
+    auto N = parseCount(*Pops, "__pops", Where);
+    if (!N)
+      return N.takeError();
+    K.Pops = *N;
+  }
+
+  std::vector<std::string> Parts;
+  std::vector<std::optional<Place>> Places;
+  for (StringRef P : splitArgs(Text.slice(Open + 1, Close))) {
+    std::string S = P.str();
+    std::optional<std::string> Regs = takeAttr(S, "__reg");
+    std::optional<std::string> Stack = takeAttr(S, "__stack");
+    Parts.push_back(StringRef(S).trim().str());
+    if (Parts.back().empty() || Parts.back() == "void")
+      continue;
+    if (Regs && Stack)
+      return createStringError("%s: '%s' has two places", Where.c_str(),
+                               Parts.back().c_str());
+    std::optional<Place> Pl;
+    if (Regs) {
+      auto R = parseRegs(*Regs, Where);
+      if (!R)
+        return R.takeError();
+      Pl = Place{*R, std::nullopt};
+    } else if (Stack) {
+      auto N = parseCount(*Stack, "__stack", Where);
+      if (!N)
+        return N.takeError();
+      Pl = Place{{}, *N};
+    }
+    Placed |= Pl.has_value();
+    Places.push_back(Pl);
+  }
+  K.Params = join(Parts, ", ");
+
   if (Error E = checkTypes(K.RetType + " " + K.Params, Where))
     return std::move(E);
-  for (const Param &P : parameters(K.Params))
+  std::vector<Param> Params = parameters(K.Params);
+  for (const Param &P : Params)
     if (regNamed(P.Name) || P.Name == "result")
       return createStringError("%s: parameter '%s' hides a name conditions "
                                "use",
                                Where.c_str(), P.Name.str().c_str());
+
+  // Outside the C convention, every value needs a place.
+  if (Placed) {
+    K.Placed = true;
+    for (size_t I = 0; I < Places.size(); ++I) {
+      if (!Places[I])
+        return createStringError("%s: '%s' needs __reg() or __stack(), as "
+                                 "other values have places",
+                                 Where.c_str(), Params[I].Name.str().c_str());
+      K.ParamPlaces.push_back(*Places[I]);
+    }
+    if (K.RetType != "void" && !K.RetPlace)
+      return createStringError("%s: the result needs __reg(), as other values "
+                               "have places",
+                               Where.c_str());
+    if (K.RetType == "void" && K.RetPlace)
+      return createStringError("%s: a void function has no result to place",
+                               Where.c_str());
+  }
   return K;
 }
 

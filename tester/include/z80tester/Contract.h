@@ -45,6 +45,13 @@ struct Condition {
   std::string where() const;
 };
 
+/// Where a value is passed, for a function outside the C calling convention:
+/// in registers, most significant first, or in the stack arguments.
+struct Place {
+  std::vector<Reg> Regs;
+  std::optional<unsigned> Stack; // bytes above the return address
+};
+
 /// Arguments to try before any others.
 struct Example {
   std::vector<std::pair<unsigned, std::string>> Values; // parameter, C value
@@ -57,10 +64,16 @@ struct Example {
 struct Contract {
   std::string Name; // the function's C name
   std::string RetType;
-  std::string Params; // as written, without the parentheses
+  std::string Params; // without the parentheses and the places
   std::string File;
   unsigned Line = 0;
   std::vector<Condition> Requires, Ensures;
+
+  // Where the prototype places its values; all empty under the C convention.
+  std::vector<Place> ParamPlaces;
+  std::optional<Place> RetPlace;
+  unsigned Pops = 0; // stack argument bytes the function removes
+  bool Placed = false;
 
   // How to test it, where the contract says.
   bool Exhaustive = false;

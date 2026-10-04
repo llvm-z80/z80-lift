@@ -11,6 +11,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <set>
 #include <thread>
 #include <unistd.h>
 
@@ -339,7 +340,7 @@ private:
     R.MaxSteps = std::max(R.MaxSteps, S.Steps);
 
     std::string Problem;
-    uint16_t WantSP = L.CalleeCleanup ? StackTop : Base;
+    uint16_t WantSP = Base + L.Popped;
     if (!Decoded)
       Problem = formatv("cannot decode 0x{0:x-4}", S.PC).str();
     else if (S.Fault == FaultStepLimit)
@@ -422,6 +423,78 @@ private:
 
 } // namespace
 
+/// The layout of a call whose contract places its values.
+static Expected<CallLayout> placeCall(const Contract &K, ArrayRef<Ty> Params,
+                                      std::optional<Ty> Ret) {
+  std::string Where = K.where();
+  if (Params.size() != K.ParamPlaces.size())
+    return createStringError("%s: the parameters do not match their places",
+                             Where.c_str());
+  auto Expand = [](const std::vector<Reg> &Regs) {
+    std::vector<Reg8> Out;
+    for (Reg R : Regs) {
+      switch (R) {
+      case Reg::A: Out.push_back(RA); break;
+      case Reg::B: Out.push_back(RB); break;
+      case Reg::C: Out.push_back(RC); break;
+      case Reg::D: Out.push_back(RD); break;
+      case Reg::E: Out.push_back(RE); break;
+      case Reg::H: Out.push_back(RH); break;
+      case Reg::L: Out.push_back(RL); break;
+      case Reg::BC: Out.insert(Out.end(), {RB, RC}); break;
+      case Reg::DE: Out.insert(Out.end(), {RD, RE}); break;
+      case Reg::HL: Out.insert(Out.end(), {RH, RL}); break;
+      default: break;
+      }
+    }
+    return Out;
+  };
+
+  CallLayout L;
+  std::set<Reg8> Used;
+  for (size_t I = 0; I < Params.size(); ++I) {
+    const Place &Pl = K.ParamPlaces[I];
+    Loc Lc;
+    Lc.Size = sizeOf(Params[I]);
+    if (Pl.Stack) {
+      Lc.Offset = *Pl.Stack;
+      for (const Loc &O : L.Params)
+        if (O.Regs.empty() && Lc.Offset < O.Offset + O.Size &&
+            O.Offset < Lc.Offset + Lc.Size)
+          return createStringError("%s: parameters overlap on the stack",
+                                   Where.c_str());
+      L.StackBytes = std::max(L.StackBytes, Lc.Offset + Lc.Size);
+    } else {
+      Lc.Regs = Expand(Pl.Regs);
+      if (Lc.Regs.size() != Lc.Size)
+        return createStringError("%s: parameter %zu takes %u bytes, but its "
+                                 "registers hold %zu",
+                                 Where.c_str(), I + 1, Lc.Size, Lc.Regs.size());
+      for (Reg8 R : Lc.Regs)
+        if (!Used.insert(R).second)
+          return createStringError("%s: parameters share a register",
+                                   Where.c_str());
+    }
+    L.Params.push_back(Lc);
+  }
+  if (Ret) {
+    Loc Lc;
+    Lc.Size = sizeOf(*Ret);
+    Lc.Regs = Expand(K.RetPlace->Regs);
+    if (Lc.Regs.size() != Lc.Size)
+      return createStringError("%s: the result takes %u bytes, but its "
+                               "registers hold %zu",
+                               Where.c_str(), Lc.Size, Lc.Regs.size());
+    L.Ret = Lc;
+  }
+  if (K.Pops > L.StackBytes)
+    return createStringError("%s: __pops(%u) is more than the %u bytes of "
+                             "stack arguments",
+                             Where.c_str(), K.Pops, L.StackBytes);
+  L.Popped = K.Pops;
+  return L;
+}
+
 Expected<TestPlan> z80tester::planTest(Cpu C, const Image &Img,
                                        const Contract &K,
                                        const Signature &Sig) {
@@ -445,7 +518,8 @@ Expected<TestPlan> z80tester::planTest(Cpu C, const Image &Img,
   if (P.Exhaustive && inputBits(P.Params) >= 64)
     return createStringError("%s: %u input bits are too many to try them all",
                              K.where().c_str(), inputBits(P.Params));
-  auto Layout = layoutCall(C, CallConv::SDCCCall1, P.Params, P.Ret);
+  auto Layout = K.Placed ? placeCall(K, P.Params, P.Ret)
+                         : layoutCall(C, CallConv::SDCCCall1, P.Params, P.Ret);
   if (!Layout)
     return Layout.takeError();
   P.Layout = *Layout;

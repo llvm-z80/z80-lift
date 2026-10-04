@@ -189,12 +189,14 @@ Expected<CallLayout> z80tester::layoutCall(Cpu C, CallConv CC,
   }
   L.StackBytes = Offset;
 
+  bool CalleeCleanup;
   if (C == Cpu::SM83) {
-    L.CalleeCleanup = true;
+    CalleeCleanup = true;
   } else {
     unsigned RetBits = Ret ? sizeOf(*Ret) * 8 : 0;
-    L.CalleeCleanup = RetBits <= 16 || (Ret == Ty::F32 && !Params.empty() &&
-                                        Params[0] == Ty::F32);
+    CalleeCleanup = RetBits <= 16 ||
+                    (Ret == Ty::F32 && !Params.empty() && Params[0] == Ty::F32);
   }
+  L.Popped = CalleeCleanup ? L.StackBytes : 0;
   return L;
 }
