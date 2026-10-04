@@ -25,60 +25,64 @@ using namespace z80tester;
 
 namespace {
 
+cl::OptionCategory Category("z80-tester options");
+
 cl::SubCommand CheckCmd("check",
                         "Test runtime functions against their contracts");
-cl::SubCommand EmitTVCmd("emit-tv", "Write @src and @tgt for alive-tv");
 
 cl::opt<std::string>
     InputPath(cl::Positional, cl::Required,
               cl::desc("<linked image, or assembly file or directory>"),
-              cl::sub(CheckCmd), cl::sub(EmitTVCmd));
+              cl::sub(CheckCmd), cl::cat(Category));
 
 cl::list<std::string>
     Names(cl::Positional,
           cl::desc("<function>... (default: every function with a contract)"),
-          cl::sub(CheckCmd), cl::sub(EmitTVCmd));
+          cl::sub(CheckCmd), cl::cat(Category));
 
 cl::opt<Cpu> CpuFlag("cpu", cl::desc("CPU of the program"),
                      cl::values(clEnumValN(Cpu::Z80, "z80", "Z80 (default)"),
                                 clEnumValN(Cpu::SM83, "sm83", "SM83")),
-                     cl::init(Cpu::Z80), cl::sub(cl::SubCommand::getAll()));
+                     cl::init(Cpu::Z80), cl::sub(cl::SubCommand::getAll()),
+                     cl::cat(Category));
 
 cl::list<std::string>
     ContractPaths("contracts",
                   cl::desc("A file of contracts, or a directory whose *.asm "
                            "files hold them"),
-                  cl::sub(CheckCmd), cl::sub(EmitTVCmd));
+                  cl::sub(CheckCmd), cl::cat(Category));
 
 cl::opt<std::string> ClangPath("clang",
                                cl::desc("clang to compile the contracts with"),
                                cl::init(Z80TESTER_CLANG), cl::sub(CheckCmd),
-                               cl::sub(EmitTVCmd));
+                               cl::cat(Category));
 
 enum class Engine { Jit, Interp };
 cl::opt<Engine> EngineFlag(
     "engine", cl::desc("How to run the runtime functions"),
     cl::values(clEnumValN(Engine::Jit, "jit", "lifted and JIT-compiled"),
                clEnumValN(Engine::Interp, "interp", "core's interpreter")),
-    cl::init(Engine::Jit), cl::sub(CheckCmd));
+    cl::init(Engine::Jit), cl::sub(CheckCmd), cl::cat(Category));
 
 cl::opt<unsigned> Threads("threads",
                           cl::desc("Worker threads (default: all cores)"),
-                          cl::init(0), cl::sub(CheckCmd));
+                          cl::init(0), cl::sub(CheckCmd), cl::cat(Category));
 // The contract's `tests` take precedence over these.
 cl::opt<unsigned> MaxBits(
     "max-exhaustive-bits",
     cl::desc("Try every input up to this many input bits, sample above"),
-    cl::init(32), cl::sub(CheckCmd));
+    cl::init(32), cl::sub(CheckCmd), cl::cat(Category));
 cl::opt<uint64_t> Samples("samples", cl::desc("Inputs to sample"),
-                          cl::init(1 << 24), cl::sub(CheckCmd));
+                          cl::init(1 << 24), cl::sub(CheckCmd),
+                          cl::cat(Category));
 cl::opt<uint64_t> Seed("seed", cl::desc("Random seed"), cl::init(1),
-                       cl::sub(CheckCmd));
+                       cl::sub(CheckCmd), cl::cat(Category));
 cl::opt<uint64_t> StepLimit("step-limit",
                             cl::desc("Instructions a call may run"),
-                            cl::init(100000), cl::sub(CheckCmd));
+                            cl::init(100000), cl::sub(CheckCmd),
+                            cl::cat(Category));
 cl::opt<unsigned> Reports("reports", cl::desc("Failures to show per function"),
-                          cl::init(10), cl::sub(CheckCmd));
+                          cl::init(10), cl::sub(CheckCmd), cl::cat(Category));
 
 [[noreturn]] void fail(Error E) {
   WithColor::error(errs(), "z80-tester") << toString(std::move(E)) << '\n';
@@ -338,15 +342,12 @@ int runCheck() {
 
 int main(int argc, char **argv) {
   InitLLVM X(argc, argv);
+  // Only our options; those of the linked LLVM libraries still work.
+  cl::HideUnrelatedOptions(Category);
   cl::ParseCommandLineOptions(
       argc, argv, "Tests the llvm-z80 runtime against its contracts\n");
   if (CheckCmd)
     return runCheck();
-  if (EmitTVCmd) {
-    WithColor::error(errs(), "z80-tester")
-        << "emit-tv is not implemented yet\n";
-    return 1;
-  }
   cl::PrintHelpMessage();
   return 1;
 }

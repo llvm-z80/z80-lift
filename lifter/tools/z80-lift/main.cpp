@@ -17,23 +17,27 @@ using namespace z80lift;
 
 namespace {
 
+cl::OptionCategory Category("z80-lift options");
+
 cl::SubCommand Decode("decode", "Disassemble functions of a runtime image");
 cl::SubCommand Lift("lift", "Print the lifted IR of functions");
 
 cl::opt<std::string> ImagePath(cl::Positional, cl::Required,
                                cl::desc("<image>"), cl::sub(Decode),
-                               cl::sub(Lift));
+                               cl::sub(Lift), cl::cat(Category));
 
 cl::list<std::string> Symbols(cl::Positional, cl::desc("<function>..."),
-                              cl::sub(Decode), cl::sub(Lift));
+                              cl::sub(Decode), cl::sub(Lift),
+                              cl::cat(Category));
 
 cl::opt<Cpu> CpuFlag("cpu", cl::desc("CPU of the program"),
                      cl::values(clEnumValN(Cpu::Z80, "z80", "Z80 (default)"),
                                 clEnumValN(Cpu::SM83, "sm83", "SM83")),
-                     cl::init(Cpu::Z80), cl::sub(cl::SubCommand::getAll()));
+                     cl::init(Cpu::Z80), cl::sub(cl::SubCommand::getAll()),
+                     cl::cat(Category));
 
 cl::opt<bool> Raw("raw", cl::desc("Print the IR before optimization"),
-                  cl::sub(Lift));
+                  cl::sub(Lift), cl::cat(Category));
 
 [[noreturn]] void fail(Error E) {
   WithColor::error(errs(), "z80-lift") << toString(std::move(E)) << '\n';
@@ -119,6 +123,8 @@ int runLift() {
 
 int main(int argc, char **argv) {
   InitLLVM X(argc, argv);
+  // Only our options; those of the linked LLVM libraries still work.
+  cl::HideUnrelatedOptions(Category);
   cl::ParseCommandLineOptions(argc, argv, "Z80/SM83 machine code lifter\n");
   if (Decode)
     return runDecode();
