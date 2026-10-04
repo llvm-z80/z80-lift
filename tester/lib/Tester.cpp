@@ -289,7 +289,7 @@ public:
       Rng G = rngFor(O.Seed, ArenaStream, 0);
       fill(ArenaLo, ArenaHi, G);
       Arena.assign(Mem.begin() + ArenaLo, Mem.begin() + ArenaHi);
-      Pre.resize(WindowHi - ArenaLo);
+      Pre.resize(Mem.size());
     }
   }
 
@@ -337,9 +337,9 @@ private:
   std::vector<uint8_t> Mem;
   bool HasPointers = false;
   std::vector<uint8_t> Arena; // the arena's contents between calls
-  std::vector<uint8_t> Pre;   // memory from ArenaLo before the call
+  std::vector<uint8_t> Pre;   // memory before the call
 
-  uint8_t *preAt(uint16_t A) { return Pre.data() + (A - ArenaLo); }
+  uint8_t *preAt(uint16_t A) { return Pre.data() + A; }
 
   void fill(uint32_t Lo, uint32_t Hi, Rng &G) {
     for (uint32_t A = Lo; A < Hi; A += 8) {
@@ -533,8 +533,6 @@ private:
     alignas(16) uint8_t Slots[MaxValues][16] = {};
     putParams(Slots, In, true);
     for (const RangeCheck &Rg : P.Ranges) {
-      if (!Rg.Writes)
-        continue;
       int64_t A = uint16_t(In.Vals[Rg.Param]);
       Allowed.push_back({A + bound(Rg.Lo, Rg.Where, Slots),
                          A + bound(Rg.Hi, Rg.Where, Slots)});
@@ -586,7 +584,7 @@ private:
     S.SP = Base - 2;
     writeMem(M, S.SP, Sentinel, 2);
     if (HasPointers)
-      std::memcpy(Pre.data(), M + ArenaLo, Pre.size());
+      std::memcpy(Pre.data(), M, Pre.size());
 
     if (P.Requires.Fn) {
       alignas(16) uint8_t Slots[MaxValues][16] = {};
@@ -623,7 +621,8 @@ private:
       Problem =
           formatv("returns with SP 0x{0:x-4}, expected 0x{1:x-4}", S.SP, WantSP)
               .str();
-    else if (P.C == Cpu::Z80 && (S.IXH != Before.IXH || S.IXL != Before.IXL))
+    else if (P.C == Cpu::Z80 && !P.Placed &&
+             (S.IXH != Before.IXH || S.IXL != Before.IXL))
       Problem = "clobbers IX";
     if (!Problem.empty()) {
       ++R.Faults;
@@ -792,6 +791,7 @@ Expected<TestPlan> z80tester::planTest(Cpu C, const Image &Img,
                              K.where().c_str());
   P.Exhaustive = K.Exhaustive;
   P.Samples = K.Samples;
+  P.Placed = K.Placed;
 
   auto IsString = [&](unsigned I) {
     return llvm::any_of(
@@ -799,7 +799,7 @@ Expected<TestPlan> z80tester::planTest(Cpu C, const Image &Img,
   };
   for (const Range &R : K.Ranges)
     P.Ranges.push_back(
-        {R.Param, R.Writes, llvm::all_of(R.Pointers, IsString), R.where()});
+        {R.Param, llvm::all_of(R.Pointers, IsString), R.where()});
   for (const Domain &D : K.Domains)
     P.Domains.push_back({D.Param, D.String, D.where()});
 

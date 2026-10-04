@@ -41,10 +41,9 @@ struct ExampleCheck {
   std::vector<std::pair<unsigned, AdapterFn>> Values;
 };
 
-/// The compiled bounds of a `reads` or `modifies` range.
+/// The compiled bounds of a `modifies` range.
 struct RangeCheck {
   unsigned Param = 0;
-  bool Writes = false;
   bool Sizes =
       false; // whether it sizes the buffer; its bounds read only strings
   std::string Where;
@@ -84,6 +83,7 @@ struct TestPlan {
   std::vector<Ty> Params;
   std::optional<Ty> Ret;
   CallLayout Layout;
+  bool Placed = false; // outside the C convention, which keeps IX
   std::vector<ParamInfo> Info;
   Check Requires; // all of them in one function, or none if Fn is null
   std::vector<Check> Ensures;

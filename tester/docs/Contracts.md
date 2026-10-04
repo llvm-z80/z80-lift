@@ -46,9 +46,9 @@ have only one contract.
 - The prototype is one line, starting at the beginning of the line (after
   `;@ ` in assembly). The indented lines below it belong to the same
   contract.
-- `requires`, `reads`, `modifies`, `ensures` and `tests` begin a section. Each
-  item ends with `;` and may span several lines. An item may follow the
-  keyword on the same line.
+- `requires`, `modifies`, `ensures` and `tests` begin a section. Each item
+  ends with `;` and may span several lines. An item may follow the keyword on
+  the same line.
 - An `#include` line at the beginning of a line adds a C header for every
   contract. A quoted path is relative to the file.
 - `//` begins a comment that ends at the end of the line.
@@ -104,6 +104,10 @@ prototype:
 
 Once one value has a place, every parameter and the result need one.
 
+Only `__sdcccall(1)` promises to keep IX, so a function placed by hand is not
+checked for it. A register it must keep goes in `ensures`, as
+`IX == old(IX);`.
+
 The backend calls `__z80_memcpy_builtin` with all three arguments in
 registers:
 
@@ -120,28 +124,22 @@ A stack argument removed by the function, written out in full. This is how
 
 ## Memory
 
-Each pointer argument points to a buffer in a shared area of memory, at a
-random address. Buffers are often next to or over one another, so a contract
-that does not allow overlap says so in `requires`. The bytes around a buffer
-are random too.
+Each pointer argument points to a buffer at a random address. Buffers may
+overlap, so a contract that does not allow overlap says so in `requires`.
 
-`reads` and `modifies` list the memory a function uses through its pointers:
+`modifies` lists the memory a function may write through its pointers:
 
 - `p[lo .. hi]` is the bytes from `p + lo` up to `p + hi`; `*p` is the value
   `p` points to. The bounds are C expressions, read before the call.
-- A function may write only to what `modifies` lists, apart from its own
-  stack. Writing anywhere else breaks the contract, even without a
+- Apart from its own stack, a function may write only to what `modifies`
+  lists. Writing anywhere else breaks the contract, even without a
   `modifies` section.
-- `reads` is not checked. With `modifies`, it sets how large each buffer is.
-  A buffer is as large as its ranges whose bounds use only numbers and
-  strings, its string, or the type it points to.
+- A buffer is as large as what `modifies` lists in it, or its string.
 
 `memmove` must handle overlapping buffers, and `memcpy` need not:
 
 ```asm
 ;@ uint8_t *memmove(uint8_t *dst, const uint8_t *src, uint16_t n)
-;@     reads
-;@         src[0 .. n];
 ;@     modifies
 ;@         dst[0 .. n];
 ;@     ensures
@@ -259,14 +257,10 @@ Other helpers come from a header of your own:
 A pointer that `old()` returns points into memory as it was, so compare
 pointers outside `old()`.
 
-Signed overflow wraps, and floating-point operations are not fused. Other
-undefined behaviour, such as division by zero, an oversized shift or a bad
-pointer, stops the run and reports the line.
+Signed overflow wraps. Other undefined behaviour, such as division by zero,
+an oversized shift or a bad pointer, stops the run and reports the line.
 
-An input is called only if every `requires` condition holds; other inputs are
-skipped and not counted as checked. Each `ensures` condition is checked
-separately, and the first one that fails is reported with the result and the
-registers it uses.
+Inputs that do not meet `requires` are skipped and not counted as checked.
 
 ## Test settings
 
@@ -274,22 +268,16 @@ The `tests` section sets how the function is tested. Without it, the command
 line options apply.
 
 - `exhaustive;` tries every input. Pointer and string parameters are not
-  counted, and there must be fewer than 2⁶⁴ inputs.
-- `samples N;` tries N random inputs. About a quarter of the values are
-  boundary values: 0, powers of two and their neighbours, the extremes and
-  the ends of a range, and for floats also ±0.5, 2²³, 2³¹, infinities and
-  NaNs.
-- `x in lo .. hi;` draws a number from a range. For floats, every float in the
-  range is equally likely, whatever its magnitude. `x, y in lo .. hi;` gives
+  counted.
+- `samples N;` tries N random inputs.
+- `x in lo .. hi;` draws a number from a range. `x, y in lo .. hi;` gives
   several parameters the same range.
 - `s in string(lo .. hi);` makes a pointer a NUL-terminated string whose
-  length is in the range; `s in string;` allows lengths up to 64. A string is
-  often similar to an earlier string argument, as comparisons need.
+  length is in the range; `s in string;` allows lengths up to 64.
 - `example a = value, b = value;` tries these arguments before any others.
   Values are C expressions such as `INT16_MIN`, `-0.5f` or `0x1p31f`; a
-  pointer takes a string literal, whose bytes and NUL start its buffer.
-  Missing parameters are drawn at random, up to 1000 times, until `requires`
-  holds. If it never holds, the example is reported as a failure.
+  pointer takes a string literal, whose bytes start its buffer. Parameters
+  it leaves out are drawn at random until `requires` holds.
 
 A contract can have either `exhaustive` or `samples`, and any number of
 examples. If neither is given, a function is tried on every input when there
@@ -342,20 +330,16 @@ An example that fixes one argument and draws the other:
 ;@         example a = INT16_MIN;
 ```
 
-Each input is drawn from its own random numbers, so results do not depend on
-`--threads`.
-
 ## Call checks
 
 Every call is also checked independently of the contract. A call is counted as
 a bad call if it:
 
 - runs more than `--step-limit` instructions;
-- writes outside its stack, its result buffer and, for a function with
-  pointer arguments, the buffers' memory;
+- writes to memory that is neither its stack nor its arguments' buffers;
 - halts, or returns somewhere other than its caller;
 - leaves SP different from what the calling convention requires;
-- changes IX on the Z80.
+- changes IX on the Z80, under `__sdcccall(1)`.
 
 Registers that carry no argument start with random values, so a function that
 reads one of them fails its contract.

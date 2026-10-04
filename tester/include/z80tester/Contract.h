@@ -56,12 +56,11 @@ struct ParamInfo {
   unsigned Pointee = 1; // bytes a pointer's type points to
 };
 
-/// Memory a function reads or writes through a pointer parameter, from Lo up
-/// to Hi bytes past it.
+/// Memory a function may write through a pointer parameter, from Lo up to Hi
+/// bytes past it.
 struct Range {
   unsigned Param = 0;
   std::string Lo, Hi;             // C expressions
-  bool Writes = false;            // from `modifies`, else from `reads`
   std::vector<unsigned> Pointers; // pointer parameters the bounds read through
   std::string File;
   unsigned Line = 0;

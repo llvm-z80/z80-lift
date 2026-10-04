@@ -379,12 +379,11 @@ std::optional<unsigned> paramNamed(const Contract &K, StringRef Name) {
   return std::nullopt;
 }
 
-/// Reads a `reads` or `modifies` item: `p[lo .. hi]` or `*p`.
-Error applyRange(Contract &K, const Condition &Item, bool Writes) {
+/// Reads a `modifies` item: `p[lo .. hi]` or `*p`.
+Error applyRange(Contract &K, const Condition &Item) {
   std::string Where = Item.where();
   StringRef Text = Item.Text;
   Range R;
-  R.Writes = Writes;
   R.File = Item.File;
   R.Line = Item.Line;
   StringRef Name;
@@ -529,7 +528,7 @@ std::string includeLine(StringRef Text, StringRef File) {
   return ("#include \"" + Path + "\"").str();
 }
 
-enum class Part { None, Requires, Ensures, Reads, Modifies, Tests };
+enum class Part { None, Requires, Ensures, Modifies, Tests };
 
 Error parseFile(StringRef Path, Cpu C, std::vector<Contract> &Out) {
   auto Buf = MemoryBuffer::getFile(Path);
@@ -545,7 +544,7 @@ Error parseFile(StringRef Path, Cpu C, std::vector<Contract> &Out) {
   std::vector<std::string> Includes;
   Contract *Cur = nullptr;
   Part Section = Part::None;
-  // The items of reads, modifies and tests, by index into Out.
+  // The items of modifies and tests, by index into Out.
   std::map<size_t, std::vector<std::pair<Part, Condition>>> Items;
   Condition Pending;
   auto Unfinished = [&]() -> Error {
@@ -601,7 +600,6 @@ Error parseFile(StringRef Path, Cpu C, std::vector<Contract> &Out) {
     Part P = StringSwitch<Part>(Word)
                  .Case("requires", Part::Requires)
                  .Case("ensures", Part::Ensures)
-                 .Case("reads", Part::Reads)
                  .Case("modifies", Part::Modifies)
                  .Case("tests", Part::Tests)
                  .Default(Part::None);
@@ -658,7 +656,7 @@ Error parseFile(StringRef Path, Cpu C, std::vector<Contract> &Out) {
         Tests.push_back(Item);
         continue;
       }
-      if (Error E = applyRange(Out[I], Item, P == Part::Modifies))
+      if (Error E = applyRange(Out[I], Item))
         return E;
     }
     if (Error E = applyTests(Out[I], Tests))
