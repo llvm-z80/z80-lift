@@ -40,7 +40,43 @@ struct Condition {
   std::string Text;
   std::string File;
   unsigned Line = 0;
-  std::vector<Reg> Regs; // the registers it reads, in order of first use
+  std::vector<Reg> Regs;    // the registers it reads, in order of first use
+  std::vector<Reg> OldRegs; // the registers it reads inside old()
+  bool UsesOld = false;
+
+  std::string where() const;
+};
+
+/// A parameter of the prototype.
+struct ParamInfo {
+  std::string Name;
+  std::string Type; // as written, without the name
+  bool Pointer = false;
+  bool Signed = false;  // for an integer
+  unsigned Pointee = 1; // bytes a pointer's type points to
+};
+
+/// Memory a function reads or writes through a pointer parameter, from Lo up
+/// to Hi bytes past it.
+struct Range {
+  unsigned Param = 0;
+  std::string Lo, Hi;             // C expressions
+  bool Writes = false;            // from `modifies`, else from `reads`
+  std::vector<unsigned> Pointers; // pointer parameters the bounds read through
+  std::string File;
+  unsigned Line = 0;
+
+  std::string where() const;
+};
+
+/// The values `tests` draws a parameter from: a half-open range of numbers,
+/// or strings whose length is in the range.
+struct Domain {
+  unsigned Param = 0;
+  std::string Lo, Hi; // C expressions
+  bool String = false;
+  std::string File;
+  unsigned Line = 0;
 
   std::string where() const;
 };
@@ -65,9 +101,12 @@ struct Contract {
   std::string Name; // the function's C name
   std::string RetType;
   std::string Params; // without the parentheses and the places
+  std::vector<ParamInfo> ParamList;
   std::string File;
   unsigned Line = 0;
+  std::vector<std::string> Includes; // `#include` lines of its file
   std::vector<Condition> Requires, Ensures;
+  std::vector<Range> Ranges;
 
   // Where the prototype places its values; all empty under the C convention.
   std::vector<Place> ParamPlaces;
@@ -78,6 +117,7 @@ struct Contract {
   // How to test it, where the contract says.
   bool Exhaustive = false;
   std::optional<uint64_t> Samples;
+  std::vector<Domain> Domains;
   std::vector<Example> Examples;
 
   std::string where() const;
@@ -93,10 +133,12 @@ std::string signatureFunction(size_t I);
 std::string requiresFunction(size_t I);
 std::string ensuresFunction(size_t I, size_t K);
 std::string exampleFunction(size_t I, size_t E, size_t V);
+std::string rangeFunction(size_t I, size_t R, bool Hi);
+std::string domainFunction(size_t I, size_t D, bool Hi);
 
 /// C that defines, for each contract, a function with its prototype, one
-/// testing all of `requires`, one per `ensures` condition, and one per value
-/// of each example.
+/// testing all of `requires`, one per `ensures` condition, one per bound of
+/// each range and domain, and one per value of each example.
 std::string contractSource(llvm::ArrayRef<Contract> Contracts);
 
 /// Compiles contractSource with the given clang to bitcode.

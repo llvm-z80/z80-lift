@@ -13,6 +13,7 @@
 
 #include <cstring>
 #include <map>
+#include <set>
 
 using namespace llvm;
 using namespace z80core;
@@ -114,6 +115,73 @@ SmallVector<StringRef> splitArgs(StringRef S) {
   }
   Out.push_back(S.drop_front(Start).trim());
   return Out;
+}
+
+/// The index of the parenthesis that closes the one at Open, or npos.
+size_t matchParen(StringRef S, size_t Open) {
+  int Depth = 0;
+  for (size_t I = Open; I < S.size(); ++I) {
+    if (S[I] == '(')
+      ++Depth;
+    else if (S[I] == ')' && --Depth == 0)
+      return I;
+  }
+  return StringRef::npos;
+}
+
+/// The outermost `old(...)` calls in a condition, as [start, close] indices.
+std::vector<std::pair<size_t, size_t>> oldCalls(StringRef S) {
+  std::vector<std::pair<size_t, size_t>> Calls;
+  for (size_t I = S.find("old("); I != StringRef::npos;
+       I = S.find("old(", I + 1)) {
+    if (I && isIdentChar(S[I - 1]))
+      continue;
+    if (!Calls.empty() && I <= Calls.back().second)
+      continue;
+    size_t Close = matchParen(S, I + 3);
+    if (Close == StringRef::npos)
+      break;
+    Calls.push_back({I, Close});
+  }
+  return Calls;
+}
+
+/// Bytes of a fixed-width type, or 1 if it is not one.
+unsigned typeBytes(StringRef Type) {
+  if (Type.contains('*'))
+    return 2;
+  std::vector<StringRef> Ids = identifiers(Type);
+  for (StringRef Id : Ids) {
+    unsigned N = StringSwitch<unsigned>(Id)
+                     .Cases({"uint8_t", "int8_t"}, 1)
+                     .Cases({"uint16_t", "int16_t", "_Float16"}, 2)
+                     .Cases({"uint32_t", "int32_t", "float"}, 4)
+                     .Cases({"uint64_t", "int64_t"}, 8)
+                     .Case("__int128", 16)
+                     .Default(0);
+    if (N)
+      return N;
+  }
+  return 1;
+}
+
+ParamInfo paramInfo(const Param &P) {
+  ParamInfo I;
+  I.Name = P.Name.str();
+  I.Type = P.Type.str();
+  I.Pointer = P.Type.contains('*');
+  if (I.Pointer) {
+    StringRef Pointee = P.Type.take_front(P.Type.rfind('*'));
+    I.Pointee = typeBytes(Pointee);
+  } else {
+    std::vector<StringRef> Ids = identifiers(P.Type);
+    I.Signed = llvm::any_of(Ids, [](StringRef Id) {
+      return Id.starts_with("int") || Id == "signed";
+    });
+    I.Signed |= llvm::is_contained(Ids, "__int128") &&
+                !llvm::is_contained(Ids, "unsigned");
+  }
+  return I;
 }
 
 /// Registers named one after another, most significant first, such as HLDE.
@@ -244,6 +312,8 @@ Expected<Contract> parsePrototype(StringRef Text, StringRef File,
     return std::move(E);
   std::vector<Param> Params = parameters(K.Params);
   for (const Param &P : Params)
+    K.ParamList.push_back(paramInfo(P));
+  for (const Param &P : Params)
     if (regNamed(P.Name) || P.Name == "result")
       return createStringError("%s: parameter '%s' hides a name conditions "
                                "use",
@@ -271,22 +341,131 @@ Expected<Contract> parsePrototype(StringRef Text, StringRef File,
 }
 
 Error finishCondition(Condition &Cond, Cpu C) {
-  for (StringRef Id : identifiers(Cond.Text)) {
+  std::vector<std::pair<size_t, size_t>> Olds = oldCalls(Cond.Text);
+  Cond.UsesOld = !Olds.empty();
+  StringRef Text = Cond.Text;
+  for (StringRef Id : identifiers(Text)) {
     std::optional<Reg> R = regNamed(Id);
     if (!R)
       continue;
     if (C == Cpu::SM83 && (*R == Reg::IX || *R == Reg::IY))
       return createStringError("%s: the SM83 has no %s", Cond.where().c_str(),
                                Id.str().c_str());
-    if (!llvm::is_contained(Cond.Regs, *R))
-      Cond.Regs.push_back(*R);
+    size_t At = Id.data() - Text.data();
+    bool InOld = llvm::any_of(
+        Olds, [&](const auto &O) { return O.first <= At && At <= O.second; });
+    std::vector<Reg> &List = InOld ? Cond.OldRegs : Cond.Regs;
+    if (!llvm::is_contained(List, *R))
+      List.push_back(*R);
+  }
+  return Error::success();
+}
+
+/// Splits "lo .. hi" at its `..`.
+std::optional<std::pair<StringRef, StringRef>> splitRange(StringRef S) {
+  size_t Dots = S.find("..");
+  if (Dots == StringRef::npos)
+    return std::nullopt;
+  StringRef Lo = S.take_front(Dots).trim(), Hi = S.drop_front(Dots + 2).trim();
+  if (Lo.empty() || Hi.empty())
+    return std::nullopt;
+  return std::pair{Lo, Hi};
+}
+
+std::optional<unsigned> paramNamed(const Contract &K, StringRef Name) {
+  for (unsigned I = 0; I < K.ParamList.size(); ++I)
+    if (K.ParamList[I].Name == Name)
+      return I;
+  return std::nullopt;
+}
+
+/// Reads a `reads` or `modifies` item: `p[lo .. hi]` or `*p`.
+Error applyRange(Contract &K, const Condition &Item, bool Writes) {
+  std::string Where = Item.where();
+  StringRef Text = Item.Text;
+  Range R;
+  R.Writes = Writes;
+  R.File = Item.File;
+  R.Line = Item.Line;
+  StringRef Name;
+  if (Text.consume_front("*")) {
+    Name = Text.trim();
+    R.Lo = "0";
+    R.Hi = ("sizeof(*" + Name + ")").str();
+  } else {
+    Name = Text.take_while(isIdentChar);
+    StringRef Index = Text.drop_front(Name.size()).trim();
+    std::optional<std::pair<StringRef, StringRef>> Bounds;
+    if (Index.consume_front("[") && Index.consume_back("]"))
+      Bounds = splitRange(Index);
+    if (!Bounds)
+      return createStringError("%s: expected p[lo .. hi] or *p", Where.c_str());
+    R.Lo = Bounds->first.str();
+    R.Hi = Bounds->second.str();
+  }
+  std::optional<unsigned> P = paramNamed(K, Name);
+  if (!P || !K.ParamList[*P].Pointer)
+    return createStringError("%s: '%s' is not a pointer parameter",
+                             Where.c_str(), Name.str().c_str());
+  R.Param = *P;
+  for (StringRef Id : identifiers(R.Lo + " " + R.Hi))
+    if (std::optional<unsigned> Q = paramNamed(K, Id);
+        Q && K.ParamList[*Q].Pointer && !llvm::is_contained(R.Pointers, *Q))
+      R.Pointers.push_back(*Q);
+  if (!oldCalls(R.Lo + " " + R.Hi).empty())
+    return createStringError("%s: bounds are read before the call, so old() "
+                             "is not needed",
+                             Where.c_str());
+  K.Ranges.push_back(std::move(R));
+  return Error::success();
+}
+
+/// Reads `names in lo .. hi` or `names in string(lo .. hi)`.
+Error applyDomain(Contract &K, const Condition &Item) {
+  std::string Where = Item.where();
+  StringRef Text = Item.Text;
+  size_t In = Text.find(" in ");
+  if (In == StringRef::npos)
+    return createStringError("%s: unknown test setting '%s'", Where.c_str(),
+                             Item.Text.c_str());
+  StringRef Rhs = Text.drop_front(In + 4).trim();
+  bool String = Rhs.consume_front("string");
+  Rhs = Rhs.trim();
+  std::pair<StringRef, StringRef> Bounds{"0", "65"};
+  if (!String || !Rhs.empty()) {
+    if (String && !(Rhs.consume_front("(") && Rhs.consume_back(")")))
+      return createStringError("%s: expected string(lo .. hi)", Where.c_str());
+    std::optional<std::pair<StringRef, StringRef>> R = splitRange(Rhs);
+    if (!R)
+      return createStringError("%s: expected lo .. hi", Where.c_str());
+    Bounds = *R;
+  }
+
+  SmallVector<StringRef> Names;
+  Text.take_front(In).split(Names, ',');
+  for (StringRef Name : Names) {
+    Name = Name.trim();
+    std::optional<unsigned> P = paramNamed(K, Name);
+    if (!P)
+      return createStringError("%s: no parameter '%s'", Where.c_str(),
+                               Name.str().c_str());
+    if (K.ParamList[*P].Pointer != String)
+      return createStringError(String
+                                   ? "%s: '%s' is not a pointer, so it cannot "
+                                     "be a string"
+                                   : "%s: '%s' is a pointer; give it strings",
+                               Where.c_str(), Name.str().c_str());
+    if (llvm::any_of(K.Domains, [&](const Domain &D) { return D.Param == *P; }))
+      return createStringError("%s: '%s' has a second domain", Where.c_str(),
+                               Name.str().c_str());
+    K.Domains.push_back({*P, Bounds.first.str(), Bounds.second.str(), String,
+                         Item.File, Item.Line});
   }
   return Error::success();
 }
 
 /// Reads the items of a contract's `tests`.
 Error applyTests(Contract &K, ArrayRef<Condition> Items) {
-  std::vector<Param> Params = parameters(K.Params);
   for (const Condition &Item : Items) {
     std::string Where = Item.where();
     StringRef Word = StringRef(Item.Text).take_while(isIdentChar);
@@ -309,10 +488,11 @@ Error applyTests(Contract &K, ArrayRef<Condition> Items) {
       continue;
     }
 
-    if (Word != "example")
-      return createStringError(
-          "%s: unknown test setting '%s'", Where.c_str(),
-          (Word.empty() ? StringRef(Item.Text) : Word).str().c_str());
+    if (Word != "example") {
+      if (Error E = applyDomain(K, Item))
+        return E;
+      continue;
+    }
     if (Rest.empty())
       return createStringError("%s: example gives no values", Where.c_str());
     Example E;
@@ -321,27 +501,35 @@ Error applyTests(Contract &K, ArrayRef<Condition> Items) {
     for (StringRef A : splitArgs(Rest)) {
       StringRef Name = A.split('=').first.trim();
       StringRef Value = A.split('=').second.trim();
-      auto It =
-          llvm::find_if(Params, [&](const Param &P) { return P.Name == Name; });
-      if (It == Params.end())
+      std::optional<unsigned> P = paramNamed(K, Name);
+      if (!P)
         return createStringError("%s: no parameter '%s'", Where.c_str(),
                                  Name.str().c_str());
-      if (It->Type.contains('*'))
-        return createStringError("%s: '%s' is a pointer; examples give values",
-                                 Where.c_str(), Name.str().c_str());
       if (Value.empty())
         return createStringError("%s: no value for '%s'", Where.c_str(),
                                  Name.str().c_str());
-      unsigned I = It - Params.begin();
-      if (llvm::any_of(E.Values, [&](const auto &V) { return V.first == I; }))
+      if (llvm::any_of(E.Values, [&](const auto &V) { return V.first == *P; }))
         return createStringError("%s: '%s' given twice", Where.c_str(),
                                  Name.str().c_str());
-      E.Values.push_back({I, Value.str()});
+      E.Values.push_back({*P, Value.str()});
     }
     K.Examples.push_back(std::move(E));
   }
   return Error::success();
 }
+
+/// An `#include` line, with a quoted path made absolute.
+std::string includeLine(StringRef Text, StringRef File) {
+  StringRef Name = Text.drop_front(strlen("#include")).trim();
+  if (!Name.consume_front("\"") || !Name.consume_back("\""))
+    return Text.str();
+  SmallString<128> Path(sys::path::parent_path(File));
+  sys::path::append(Path, Name);
+  sys::fs::make_absolute(Path);
+  return ("#include \"" + Path + "\"").str();
+}
+
+enum class Part { None, Requires, Ensures, Reads, Modifies, Tests };
 
 Error parseFile(StringRef Path, Cpu C, std::vector<Contract> &Out) {
   auto Buf = MemoryBuffer::getFile(Path);
@@ -353,10 +541,12 @@ Error parseFile(StringRef Path, Cpu C, std::vector<Contract> &Out) {
   StringRef Ext = sys::path::extension(Path);
   bool InAsm = Ext == ".asm" || Ext == ".s";
 
+  size_t First = Out.size();
+  std::vector<std::string> Includes;
   Contract *Cur = nullptr;
-  std::vector<Condition> *Section = nullptr;
-  bool InTests = false;
-  std::map<size_t, std::vector<Condition>> Tests; // by index into Out
+  Part Section = Part::None;
+  // The items of reads, modifies and tests, by index into Out.
+  std::map<size_t, std::vector<std::pair<Part, Condition>>> Items;
   Condition Pending;
   auto Unfinished = [&]() -> Error {
     if (Pending.Text.empty())
@@ -384,17 +574,23 @@ Error parseFile(StringRef Path, Cpu C, std::vector<Contract> &Out) {
     if (Line.trim().empty())
       continue;
 
-    // An unindented line starts a contract; the rest belong to it.
+    // An unindented line starts a contract, or includes C for all of them;
+    // the indented lines belong to the contract above.
     StringRef Text = Line.trim();
     if (Line.find_first_not_of(" \t") == 0) {
       if (Error E = Unfinished())
         return E;
+      Cur = nullptr;
+      if (Text.starts_with("#include")) {
+        Includes.push_back(includeLine(Text, Path));
+        continue;
+      }
       auto K = parsePrototype(Text, Path, LineNo);
       if (!K)
         return K.takeError();
       Out.push_back(std::move(*K));
       Cur = &Out.back();
-      Section = nullptr;
+      Section = Part::None;
       continue;
     }
     std::string Where = (sys::path::filename(Path) + ":" + Twine(LineNo)).str();
@@ -402,25 +598,26 @@ Error parseFile(StringRef Path, Cpu C, std::vector<Contract> &Out) {
       return createStringError("%s: clause outside a contract", Where.c_str());
 
     StringRef Word = Text.take_while(isIdentChar);
-    if (Word == "requires" || Word == "ensures" || Word == "tests") {
+    Part P = StringSwitch<Part>(Word)
+                 .Case("requires", Part::Requires)
+                 .Case("ensures", Part::Ensures)
+                 .Case("reads", Part::Reads)
+                 .Case("modifies", Part::Modifies)
+                 .Case("tests", Part::Tests)
+                 .Default(Part::None);
+    if (P != Part::None) {
       if (Error E = Unfinished())
         return E;
-      InTests = Word == "tests";
-      Section = Word == "requires"  ? &Cur->Requires
-                : Word == "ensures" ? &Cur->Ensures
-                                    : &Tests[Out.size() - 1];
+      Section = P;
       Text = Text.drop_front(Word.size()).trim();
       if (Text.empty())
         continue;
-    } else if (Word == "reads" || Word == "modifies") {
-      return createStringError("%s: '%s' is not supported yet", Where.c_str(),
-                               Word.str().c_str());
     }
-    if (!Section)
+    if (Section == Part::None)
       return createStringError("%s: condition outside requires or ensures",
                                Where.c_str());
 
-    // A condition runs to its ';' and may span lines.
+    // An item runs to its ';' and may span lines.
     while (!Text.empty()) {
       if (Pending.Text.empty()) {
         Pending.File = Path.str();
@@ -435,19 +632,40 @@ Error parseFile(StringRef Path, Cpu C, std::vector<Contract> &Out) {
       Pending.Text = StringRef(Pending.Text).trim().str();
       if (Pending.Text.empty())
         return createStringError("%s: empty condition", Where.c_str());
-      if (!InTests)
+      if (Section == Part::Requires || Section == Part::Ensures) {
         if (Error E = finishCondition(Pending, C))
           return E;
-      Section->push_back(std::move(Pending));
+        if (Section == Part::Requires && Pending.UsesOld)
+          return createStringError("%s: requires is read before the call, so "
+                                   "old() is not needed",
+                                   Pending.where().c_str());
+        (Section == Part::Requires ? Cur->Requires : Cur->Ensures)
+            .push_back(std::move(Pending));
+      } else {
+        Items[Out.size() - 1].push_back({Section, std::move(Pending)});
+      }
       Pending = Condition();
       Text = Rest.trim();
     }
   }
   if (Error E = Unfinished())
     return E;
-  for (auto &[I, Items] : Tests)
-    if (Error E = applyTests(Out[I], Items))
+
+  for (auto &[I, List] : Items) {
+    std::vector<Condition> Tests;
+    for (auto &[P, Item] : List) {
+      if (P == Part::Tests) {
+        Tests.push_back(Item);
+        continue;
+      }
+      if (Error E = applyRange(Out[I], Item, P == Part::Modifies))
+        return E;
+    }
+    if (Error E = applyTests(Out[I], Tests))
       return E;
+  }
+  for (size_t I = First; I < Out.size(); ++I)
+    Out[I].Includes = Includes;
   return Error::success();
 }
 
@@ -470,7 +688,8 @@ std::string lineDirective(unsigned Line, StringRef File) {
 
 // Helpers for conditions. `same` compares floats bit for bit, except that any
 // two NaNs are the same.
-const char *const Prelude = R"(#include <stdbool.h>
+const char *const Prelude = R"(#include <math.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -490,10 +709,41 @@ static inline bool z80tester_same16(_Float16 X, _Float16 Y) {
 
 #define same(X, Y)                                                             \
   _Generic((X), _Float16: z80tester_same16, default: z80tester_same32)(X, Y)
-#define isnan(X) __builtin_isnan(X)
-#define isinf(X) __builtin_isinf(X)
-#define signbit(X) __builtin_signbit(X)
+#define forall(I, Lo, Hi, Cond)                                                \
+  ({                                                                           \
+    bool z80tester_all = true;                                                 \
+    for (int64_t I = (Lo); z80tester_all && I < (Hi); ++I)                     \
+      z80tester_all = (Cond);                                                  \
+    z80tester_all;                                                             \
+  })
+#define exists(I, Lo, Hi, Cond)                                                \
+  ({                                                                           \
+    bool z80tester_any = false;                                                \
+    for (int64_t I = (Lo); !z80tester_any && I < (Hi); ++I)                    \
+      z80tester_any = (Cond);                                                  \
+    z80tester_any;                                                             \
+  })
 )";
+
+/// Rewrites each `old(e)` to evaluate e with the pointers and registers as
+/// they were before the call.
+std::string rewriteOld(StringRef Text, StringRef Decls) {
+  std::string Out;
+  size_t From = 0;
+  for (auto [At, Close] : oldCalls(Text)) {
+    Out += Text.slice(From, At);
+    Out += ("({ " + Decls + "(" + rewriteOld(Text.slice(At + 4, Close), Decls) +
+            "); })")
+               .str();
+    From = Close + 1;
+  }
+  Out += Text.drop_front(From);
+  return Out;
+}
+
+std::string regDecl(Reg R, StringRef Name) {
+  return ((regBytes(R) == 1 ? "uint8_t " : "uint16_t ") + Name).str();
+}
 
 } // namespace
 
@@ -502,6 +752,14 @@ const char *z80tester::regName(Reg R) { return RegNames[unsigned(R)]; }
 unsigned z80tester::regBytes(Reg R) { return R <= Reg::L ? 1 : 2; }
 
 std::string Condition::where() const {
+  return (sys::path::filename(File) + ":" + Twine(Line)).str();
+}
+
+std::string Range::where() const {
+  return (sys::path::filename(File) + ":" + Twine(Line)).str();
+}
+
+std::string Domain::where() const {
   return (sys::path::filename(File) + ":" + Twine(Line)).str();
 }
 
@@ -566,9 +824,23 @@ std::string z80tester::exampleFunction(size_t I, size_t E, size_t V) {
   return formatv("z80tester_ex_{0}_{1}_{2}", I, E, V).str();
 }
 
+std::string z80tester::rangeFunction(size_t I, size_t R, bool Hi) {
+  return formatv("z80tester_range_{0}_{1}_{2}", I, R, Hi ? "hi" : "lo").str();
+}
+
+std::string z80tester::domainFunction(size_t I, size_t D, bool Hi) {
+  return formatv("z80tester_dom_{0}_{1}_{2}", I, D, Hi ? "hi" : "lo").str();
+}
+
 std::string z80tester::contractSource(ArrayRef<Contract> Contracts) {
   std::string S = Prelude;
   raw_string_ostream OS(S);
+  std::set<std::string> Included;
+  for (const Contract &K : Contracts)
+    for (const std::string &Inc : K.Includes)
+      if (Included.insert(Inc).second)
+        OS << Inc << '\n';
+
   for (size_t I = 0; I < Contracts.size(); ++I) {
     const Contract &K = Contracts[I];
     bool Void = K.RetType == "void";
@@ -594,22 +866,67 @@ std::string z80tester::contractSource(ArrayRef<Contract> Contracts) {
         Parts.push_back(K.RetType + " result");
       Parts.push_back(K.Params);
       for (Reg R : Cond.Regs)
-        Parts.push_back((regBytes(R) == 1 ? "uint8_t " : "uint16_t ") +
-                        std::string(regName(R)));
+        Parts.push_back(regDecl(R, regName(R)));
+      std::string Text = Cond.Text;
+      if (Cond.UsesOld) {
+        // old() sees the pointers into memory as it was, and the registers.
+        std::string Decls;
+        for (const ParamInfo &P : K.ParamList) {
+          if (!P.Pointer)
+            continue;
+          Parts.push_back(P.Type + " z80tester_old_" + P.Name);
+          Decls += P.Type + " " + P.Name + " = z80tester_old_" + P.Name + "; ";
+        }
+        for (Reg R : Cond.OldRegs) {
+          Parts.push_back(
+              regDecl(R, "z80tester_old_" + std::string(regName(R))));
+          Decls +=
+              regDecl(R, regName(R)) + " = z80tester_old_" + regName(R) + "; ";
+        }
+        Text = rewriteOld(Text, Decls);
+      }
       OS << lineDirective(K.Line, K.File);
       OS << "bool " << ensuresFunction(I, E) << '(' << paramList(Parts)
          << ") {\n"
-         << lineDirective(Cond.Line, Cond.File) << "  return (" << Cond.Text
+         << lineDirective(Cond.Line, Cond.File) << "  return (" << Text
          << ");\n}\n";
     }
 
-    std::vector<Param> Params = parameters(K.Params);
+    for (size_t R = 0; R < K.Ranges.size(); ++R) {
+      const Range &Rg = K.Ranges[R];
+      for (bool Hi : {false, true}) {
+        OS << lineDirective(K.Line, K.File);
+        OS << "int64_t " << rangeFunction(I, R, Hi) << '('
+           << paramList({K.Params}) << ") {\n"
+           << lineDirective(Rg.Line, Rg.File) << "  return (int64_t)("
+           << (Hi ? Rg.Hi : Rg.Lo) << ");\n}\n";
+      }
+    }
+
+    // Integer bounds come back wide, as the upper one may not fit the type.
+    for (size_t D = 0; D < K.Domains.size(); ++D) {
+      const Domain &Dm = K.Domains[D];
+      const ParamInfo &P = K.ParamList[Dm.Param];
+      bool Float = StringRef(P.Type).contains("float") ||
+                   StringRef(P.Type).contains("_Float16");
+      std::string Type = Dm.String ? "int64_t" : Float ? P.Type : "__int128";
+      for (bool Hi : {false, true}) {
+        OS << lineDirective(K.Line, K.File);
+        OS << Type << ' ' << domainFunction(I, D, Hi) << "(void) {\n"
+           << lineDirective(Dm.Line, Dm.File) << "  return (" << Type << ")("
+           << (Hi ? Dm.Hi : Dm.Lo) << ");\n}\n";
+      }
+    }
+
+    // A pointer's example is a string, whose bytes go in its buffer.
     for (size_t E = 0; E < K.Examples.size(); ++E) {
       const Example &Ex = K.Examples[E];
       for (size_t V = 0; V < Ex.Values.size(); ++V) {
         const auto &[P, Value] = Ex.Values[V];
+        const ParamInfo &Info = K.ParamList[P];
         OS << lineDirective(K.Line, K.File);
-        OS << Params[P].Type << ' ' << exampleFunction(I, E, V) << "(void) {\n"
+        OS << (Info.Pointer ? std::string("const char *") : Info.Type) << ' '
+           << exampleFunction(I, E, V) << "(void) {\n"
            << lineDirective(Ex.Line, Ex.File) << "  return (" << Value
            << ");\n}\n";
       }
@@ -638,7 +955,8 @@ z80tester::compileContracts(StringRef Source, StringRef Clang) {
   }
 
   // Signed overflow from integer promotion is defined by -fwrapv; any other
-  // undefined behaviour in a condition traps.
+  // undefined behaviour in a condition traps. Pointers can be at any address,
+  // as the Z80 has no alignment.
   StringRef Args[] = {Clang,
                       "-x",
                       "c",
@@ -647,7 +965,8 @@ z80tester::compileContracts(StringRef Source, StringRef Clang) {
                       "-fwrapv",
                       "-ffp-contract=off",
                       "-fsanitize=undefined",
-                      "-fno-sanitize=signed-integer-overflow",
+                      "-fno-sanitize=signed-integer-overflow,alignment",
+                      "-fmax-type-align=1",
                       "-fsanitize-trap=undefined",
                       "-emit-llvm",
                       "-c",

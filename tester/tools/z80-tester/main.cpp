@@ -10,6 +10,7 @@
 
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Format.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/Path.h"
@@ -95,11 +96,8 @@ template <typename T> T check(Expected<T> V) {
   return std::move(*V);
 }
 
-/// The C name of an assembler symbol, or nothing for internal labels, which
-/// start with two underscores.
-std::optional<std::string> cName(StringRef Asm) {
-  if (Asm.starts_with("__") && !Asm.starts_with("___"))
-    return std::nullopt;
+/// The C name of an assembler symbol.
+std::string cName(StringRef Asm) {
   return Asm.starts_with("_") ? Asm.drop_front().str() : Asm.str();
 }
 
@@ -159,8 +157,8 @@ std::vector<std::string> uncovered(const std::vector<std::string> &Globals,
     Covered.insert(K.Name);
   std::vector<std::string> Out;
   for (const std::string &Asm : Globals)
-    if (std::optional<std::string> C = cName(Asm); C && !Covered.count(*C))
-      Out.push_back(*C);
+    if (!Covered.count(cName(Asm)))
+      Out.push_back(cName(Asm));
   return Out;
 }
 
@@ -237,6 +235,12 @@ int runCheck() {
     for (size_t E = 0; E < Contracts[I].Examples.size(); ++E)
       for (size_t V = 0; V < Contracts[I].Examples[E].Values.size(); ++V)
         Adapt.push_back(exampleFunction(I, E, V));
+    for (size_t R = 0; R < Contracts[I].Ranges.size(); ++R)
+      for (bool Hi : {false, true})
+        Adapt.push_back(rangeFunction(I, R, Hi));
+    for (size_t D = 0; D < Contracts[I].Domains.size(); ++D)
+      for (bool Hi : {false, true})
+        Adapt.push_back(domainFunction(I, D, Hi));
   }
   std::unique_ptr<Jit> J = check(Jit::create());
   std::map<std::string, Signature> Signatures =
@@ -259,6 +263,15 @@ int runCheck() {
         EC.Values.push_back({K.Examples[E].Values[V].first,
                              check(J->adapter(exampleFunction(I, E, V)))});
     }
+    for (size_t R = 0; R < P.Ranges.size(); ++R) {
+      P.Ranges[R].Lo = check(J->adapter(rangeFunction(I, R, false)));
+      P.Ranges[R].Hi = check(J->adapter(rangeFunction(I, R, true)));
+    }
+    for (size_t D = 0; D < P.Domains.size(); ++D) {
+      P.Domains[D].Lo = check(J->adapter(domainFunction(I, D, false)));
+      P.Domains[D].Hi = check(J->adapter(domainFunction(I, D, true)));
+    }
+    check(finishPlan(P));
     Plans.push_back(std::move(P));
   }
 
@@ -281,14 +294,17 @@ int runCheck() {
   O.StepLimit = StepLimit;
   O.MaxReports = Reports;
 
+  size_t Width = 16;
+  for (const TestPlan &P : Plans)
+    Width = std::max(Width, P.Name.size());
   bool AllOk = true;
   for (const TestPlan &P : Plans) {
     TestResult R = runTest(P, *Img, O);
     bool Ok = R.Mismatches == 0 && R.Faults == 0;
     AllOk &= Ok;
-    outs() << formatv("{0,-16} {1,12} {2,-9} {3,12} checked  ", P.Name,
-                      R.Inputs, R.Exhaustive ? "(all)" : "(sampled)",
-                      R.Checked);
+    outs() << left_justify(P.Name, Width)
+           << formatv(" {0,12} {1,-9} {2,12} checked  ", R.Inputs,
+                      R.Exhaustive ? "(all)" : "(sampled)", R.Checked);
     if (Ok)
       WithColor(outs(), raw_ostream::GREEN) << "ok  ";
     else
@@ -299,6 +315,11 @@ int runCheck() {
           << formatv("  {0} broken, {1} bad calls", R.Mismatches, R.Faults);
       outs() << '\n';
     }
+    if (R.Unplaced)
+      WithColor(outs(), raw_ostream::YELLOW)
+          << formatv("  {0} inputs needed more memory than the tests have; "
+                     "bound their sizes with `in`\n",
+                     R.Unplaced);
     for (const std::string &Rep : R.Reports)
       outs() << "  " << Rep << '\n';
     outs().flush();

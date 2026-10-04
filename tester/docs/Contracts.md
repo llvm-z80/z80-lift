@@ -43,12 +43,24 @@ have only one contract.
 
 ## Syntax
 
-- The prototype starts at the beginning of the line (after `;@ ` in assembly).
-  The indented lines below it belong to the same contract.
-- `requires`, `ensures` and `tests` begin a section. Each item ends with `;`
-  and may span several lines. An item may follow the keyword on the same line:
-  `requires b != 0;`.
+- The prototype is one line, starting at the beginning of the line (after
+  `;@ ` in assembly). The indented lines below it belong to the same
+  contract.
+- `requires`, `reads`, `modifies`, `ensures` and `tests` begin a section. Each
+  item ends with `;` and may span several lines. An item may follow the
+  keyword on the same line.
+- An `#include` line at the beginning of a line adds a C header for every
+  contract. A quoted path is relative to the file.
 - `//` begins a comment that ends at the end of the line.
+- Ranges are half-open everywhere: `lo .. hi` is from `lo` up to, not
+  including, `hi`.
+
+```asm
+;@ uint8_t __udivqi3(uint8_t a, uint8_t b)
+;@     requires b != 0;           // an item on the keyword's line
+;@     ensures
+;@         result == a / b;
+```
 
 ## Prototype
 
@@ -67,19 +79,20 @@ Only types with the same size on the Z80 and on the host are accepted:
 - `float`, `_Float16`
 - pointers to these
 
-`char`, `short`, `int`, `long`, `double`, `size_t` and `bool` are rejected.
-
-A pointer parameter points to a 32-byte buffer filled with random bytes. A
+`char`, `short`, `int`, `long`, `double`, `size_t` and `bool` are rejected. A
 parameter cannot be named after a register or `result`.
+
+```asm
+;@ float __addsf3(float a, float b)
+;@ unsigned __int128 __udivti3(unsigned __int128 a, unsigned __int128 b)
+;@ int32_t __divmodsi4(int32_t a, int32_t b, int32_t *rem)
+;@ uint16_t strlen(const uint8_t *s)
+```
 
 ## Calling convention
 
 A function outside `__sdcccall(1)` gives the place of every value in its
 prototype:
-
-```
-;@ uint32_t mul32(uint32_t a __reg(DEHL), uint32_t b __stack(0)) __reg(DEHL) __pops(4)
-```
 
 - `__reg(R)` after a parameter, or after the parameter list for the result,
   names its registers, most significant first: `A` to `L`, `BC`, `DE` and
@@ -91,6 +104,87 @@ prototype:
 
 Once one value has a place, every parameter and the result need one.
 
+The backend calls `__z80_memcpy_builtin` with all three arguments in
+registers:
+
+```asm
+;@ void __z80_memcpy_builtin(uint8_t *dst __reg(HL), const uint8_t *src __reg(DE), uint16_t n __reg(BC))
+```
+
+A stack argument removed by the function, written out in full. This is how
+`__sdcccall(1)` passes it anyway:
+
+```asm
+;@ float __addsf3_fast(float a __reg(HLDE), float b __stack(0)) __reg(HLDE) __pops(4)
+```
+
+## Memory
+
+Each pointer argument points to a buffer in a shared area of memory, at a
+random address. Buffers are often next to or over one another, so a contract
+that does not allow overlap says so in `requires`. The bytes around a buffer
+are random too.
+
+`reads` and `modifies` list the memory a function uses through its pointers:
+
+- `p[lo .. hi]` is the bytes from `p + lo` up to `p + hi`; `*p` is the value
+  `p` points to. The bounds are C expressions, read before the call.
+- A function may write only to what `modifies` lists, apart from its own
+  stack. Writing anywhere else breaks the contract, even without a
+  `modifies` section.
+- `reads` is not checked. With `modifies`, it sets how large each buffer is.
+  A buffer is as large as its ranges whose bounds use only numbers and
+  strings, its string, or the type it points to.
+
+`memmove` must handle overlapping buffers, and `memcpy` need not:
+
+```asm
+;@ uint8_t *memmove(uint8_t *dst, const uint8_t *src, uint16_t n)
+;@     reads
+;@         src[0 .. n];
+;@     modifies
+;@         dst[0 .. n];
+;@     ensures
+;@         result == dst;
+;@         forall(i, 0, n, dst[i] == old(src[i]));
+;@     tests
+;@         n in 0 .. 600;
+```
+
+```asm
+;@ uint8_t *memcpy(uint8_t *dst, const uint8_t *src, uint16_t n)
+;@     requires
+;@         dst + n <= src || src + n <= dst;
+;@     ...
+```
+
+An argument the function writes its answer through:
+
+```asm
+;@ int32_t __divmodsi4(int32_t a, int32_t b, int32_t *rem)
+;@     requires
+;@         b != 0;
+;@         !(a == INT32_MIN && b == -1);
+;@     modifies
+;@         *rem;
+;@     ensures
+;@         result == a / b;
+;@         *rem == a % b;
+```
+
+A buffer sized by a string argument:
+
+```asm
+;@ uint8_t *strcpy(uint8_t *dst, const uint8_t *src)
+;@     modifies
+;@         dst[0 .. strlen((const char *)src) + 1];
+;@     ensures
+;@         result == dst;
+;@         strcmp((const char *)dst, (const char *)src) == 0;
+;@     tests
+;@         src in string(0 .. 100);
+```
+
 ## Conditions
 
 Conditions are C17 expressions, compiled for the host by clang. They can use
@@ -98,25 +192,78 @@ the following names:
 
 | Name | Value |
 |---|---|
-| parameters | the arguments of the call |
-| `*p` for a pointer `p` | the buffer before the call in `requires`, after it in `ensures` |
-| `result` | the result, in `ensures` |
+| parameters | the arguments of the call; a pointer points to its buffer |
+| `result` | the result, in `ensures`; a pointer result points into the same memory |
 | `A` `B` `C` `D` `E` `H` `L` | 8-bit registers after the call, as `uint8_t` |
 | `BC` `DE` `HL` `IX` `IY` `SP` | 16-bit registers after the call, as `uint16_t` |
+| `old(e)` | `e` before the call, with memory and registers as they were |
+| `forall(i, lo, hi, c)` | true if `c` holds for every `i` in `lo .. hi` |
+| `exists(i, lo, hi, c)` | true if `c` holds for some `i` in `lo .. hi` |
 | `same(x, y)` | true if the floats have the same bits, or are both NaN |
-| `isnan`, `isinf`, `signbit` | the standard float tests |
 
-The macros of `<stdint.h>` and clang builtins such as `__builtin_roundf` can
-also be used. `IX` and `IY` are not available on the SM83.
+`requires` sees memory before the call and `ensures` after it. `IX` and `IY`
+are not available on the SM83.
 
-Register values are unsigned, so a signed result needs a cast:
-`(int16_t)HL == a % b`.
+A value the function leaves in a register besides its result:
+
+```asm
+;@ int16_t __divmodhi4(int16_t a, int16_t b)
+;@     requires
+;@         b != 0;
+;@         !(a == INT16_MIN && b == -1);
+;@     ensures
+;@         result == a / b;
+;@         (int16_t)HL == a % b;
+```
+
+Register values are unsigned, so a signed one needs a cast, as above.
+
+Arithmetic follows the host's C, where `int` is 32 bits, so a product of two
+`uint16_t` values keeps its high bits unless it is cast:
+
+```asm
+;@ uint16_t __mulhi3(uint16_t a, uint16_t b)
+;@     ensures
+;@         result == (uint16_t)(a * b);
+```
+
+The headers `<math.h>`, `<string.h>`, `<stdint.h>` and `<stdbool.h>` are
+included, so their functions serve as references:
+
+```asm
+;@ float floorf(float x)
+;@     ensures
+;@         same(result, floorf(x));
+```
+
+```asm
+;@ uint8_t *strchr(const uint8_t *s, int16_t c)
+;@     ensures
+;@         result == (uint8_t *)strchr((const char *)s, (uint8_t)c);
+;@     tests
+;@         s in string;
+```
+
+Other helpers come from a header of your own:
+
+```asm
+;@ #include "helpers.h"    // static inline int sign(int x) { return (x > 0) - (x < 0); }
+;@
+;@ int16_t strcmp(const uint8_t *a, const uint8_t *b)
+;@     ensures
+;@         sign(result) == sign(strcmp((const char *)a, (const char *)b));
+;@     tests
+;@         a, b in string(0 .. 40);
+```
+
+A pointer that `old()` returns points into memory as it was, so compare
+pointers outside `old()`.
 
 Signed overflow wraps, and floating-point operations are not fused. Other
-undefined behaviour, such as division by zero or an oversized shift, stops the
-run and reports the line.
+undefined behaviour, such as division by zero, an oversized shift or a bad
+pointer, stops the run and reports the line.
 
-An input is tested only if every `requires` condition holds. Other inputs are
+An input is called only if every `requires` condition holds; other inputs are
 skipped and not counted as checked. Each `ensures` condition is checked
 separately, and the first one that fails is reported with the result and the
 registers it uses.
@@ -126,21 +273,77 @@ registers it uses.
 The `tests` section sets how the function is tested. Without it, the command
 line options apply.
 
-- `exhaustive;` tries every input. Pointer parameters are not counted, and the
-  other parameters must total fewer than 64 bits.
+- `exhaustive;` tries every input. Pointer and string parameters are not
+  counted, and there must be fewer than 2⁶⁴ inputs.
 - `samples N;` tries N random inputs. About a quarter of the values are
-  boundary values of their type: 0, powers of two and their neighbours, and
-  the extremes, and for floats also ±0.5, 2²³, 2³¹, infinities and NaNs.
+  boundary values: 0, powers of two and their neighbours, the extremes and
+  the ends of a range, and for floats also ±0.5, 2²³, 2³¹, infinities and
+  NaNs.
+- `x in lo .. hi;` draws a number from a range. For floats, every float in the
+  range is equally likely, whatever its magnitude. `x, y in lo .. hi;` gives
+  several parameters the same range.
+- `s in string(lo .. hi);` makes a pointer a NUL-terminated string whose
+  length is in the range; `s in string;` allows lengths up to 64. A string is
+  often similar to an earlier string argument, as comparisons need.
 - `example a = value, b = value;` tries these arguments before any others.
-  Values are C expressions such as `INT16_MIN`, `-0.5f` or `0x1p31f`. Missing
-  parameters are drawn at random, up to 1000 times, until `requires` holds.
-  If it never holds, the example is reported as a failure. Pointer parameters
-  cannot be given.
+  Values are C expressions such as `INT16_MIN`, `-0.5f` or `0x1p31f`; a
+  pointer takes a string literal, whose bytes and NUL start its buffer.
+  Missing parameters are drawn at random, up to 1000 times, until `requires`
+  holds. If it never holds, the example is reported as a failure.
 
 A contract can have either `exhaustive` or `samples`, and any number of
-examples. If neither is given, a function is tried on every input when its
-parameters total `--max-exhaustive-bits` (32) bits or fewer, and on `--samples`
-(2²⁴) inputs otherwise.
+examples. If neither is given, a function is tried on every input when there
+are at most 2 to the power of `--max-exhaustive-bits` (32) of them, and on
+`--samples` (2²⁴) inputs otherwise.
+
+Every float input, whatever `--max-exhaustive-bits` says:
+
+```asm
+;@ float roundf(float x)
+;@     ensures
+;@         same(result, roundf(x));
+;@     tests
+;@         exhaustive;
+```
+
+Far fewer samples for a slow function, and the largest dividend:
+
+```asm
+;@ unsigned __int128 __udivti3(unsigned __int128 a, unsigned __int128 b)
+;@     requires
+;@         b != 0;
+;@     ensures
+;@         result == a / b;
+;@     tests
+;@         samples 20000;
+;@         example a = ~(unsigned __int128)0, b = 3;
+```
+
+Floats below 2²⁴, where the fraction bits matter:
+
+```asm
+;@     tests
+;@         x in -0x1p24f .. 0x1p24f;
+```
+
+Strings, with cases that matter for comparisons:
+
+```asm
+;@     tests
+;@         a, b in string(0 .. 40);
+;@         example a = "abc", b = "abd";
+;@         example a = "\x80", b = "\x01";
+```
+
+An example that fixes one argument and draws the other:
+
+```asm
+;@     tests
+;@         example a = INT16_MIN;
+```
+
+Each input is drawn from its own random numbers, so results do not depend on
+`--threads`.
 
 ## Call checks
 
@@ -148,7 +351,8 @@ Every call is also checked independently of the contract. A call is counted as
 a bad call if it:
 
 - runs more than `--step-limit` instructions;
-- writes outside `0x8000`–`0xC1FF`, which holds the stack and the buffers;
+- writes outside its stack, its result buffer and, for a function with
+  pointer arguments, the buffers' memory;
 - halts, or returns somewhere other than its caller;
 - leaves SP different from what the calling convention requires;
 - changes IX on the Z80.
