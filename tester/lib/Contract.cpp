@@ -470,6 +470,22 @@ Error applyTests(Contract &K, ArrayRef<Condition> Items) {
     StringRef Word = StringRef(Item.Text).take_while(isIdentChar);
     StringRef Rest = StringRef(Item.Text).drop_front(Word.size()).trim();
 
+    if (Word == "prove") {
+      if (K.Prove)
+        return createStringError("%s: prove given twice", Where.c_str());
+      if (!Rest.empty()) {
+        StringRef Key = Rest.take_while(isIdentChar);
+        unsigned N = 0;
+        if (Key != "unroll" ||
+            Rest.drop_front(Key.size()).trim().getAsInteger(0, N) || N == 0)
+          return createStringError("%s: expected 'prove' or 'prove unroll N'",
+                                   Where.c_str());
+        K.Unroll = N;
+      }
+      K.Prove = true;
+      continue;
+    }
+
     if (Word == "exhaustive" || Word == "samples") {
       if (K.Exhaustive || K.Samples)
         return createStringError("%s: exhaustive or samples given twice",
@@ -514,6 +530,9 @@ Error applyTests(Contract &K, ArrayRef<Condition> Items) {
     }
     K.Examples.push_back(std::move(E));
   }
+  if (K.Prove && K.Exhaustive)
+    return createStringError("%s: prove and exhaustive both cover every input",
+                             K.where().c_str());
   return Error::success();
 }
 
@@ -934,7 +953,7 @@ std::string z80tester::contractSource(ArrayRef<Contract> Contracts) {
 }
 
 Expected<std::unique_ptr<MemoryBuffer>>
-z80tester::compileContracts(StringRef Source, StringRef Clang) {
+z80tester::compileContracts(StringRef Source, StringRef Clang, bool Sanitize) {
   SmallString<128> In, Out;
   if (std::error_code EC =
           sys::fs::createTemporaryFile("z80tester-contracts", "c", In))
@@ -953,24 +972,21 @@ z80tester::compileContracts(StringRef Source, StringRef Clang) {
   }
 
   // Signed overflow from integer promotion is defined by -fwrapv; any other
-  // undefined behaviour in a condition traps. Pointers can be at any address,
-  // as the Z80 has no alignment.
-  StringRef Args[] = {Clang,
-                      "-x",
-                      "c",
-                      "-std=c17",
-                      "-O2",
-                      "-fwrapv",
-                      "-ffp-contract=off",
-                      "-fsanitize=undefined",
-                      "-fno-sanitize=signed-integer-overflow,alignment",
-                      "-fmax-type-align=1",
-                      "-fsanitize-trap=undefined",
-                      "-emit-llvm",
-                      "-c",
-                      In,
-                      "-o",
-                      Out};
+  // undefined behaviour in a condition traps, or for a proof stays undefined.
+  // Pointers can be at any address, as the Z80 has no alignment.
+  SmallVector<StringRef> Args = {Clang,
+                                 "-x",
+                                 "c",
+                                 "-std=c17",
+                                 "-O2",
+                                 "-fwrapv",
+                                 "-ffp-contract=off",
+                                 "-fmax-type-align=1"};
+  if (Sanitize)
+    Args.append({"-fsanitize=undefined",
+                 "-fno-sanitize=signed-integer-overflow,alignment",
+                 "-fsanitize-trap=undefined"});
+  Args.append({"-emit-llvm", "-c", In, "-o", Out});
   std::string ErrMsg;
   int RC = sys::ExecuteAndWait(Clang, Args, std::nullopt, {}, 0, 0, &ErrMsg);
   if (RC < 0)

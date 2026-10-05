@@ -5,8 +5,6 @@
 
 #include "z80core/Decoder.h"
 
-#include <string>
-
 namespace z80core {
 
 namespace z80 {
@@ -25,8 +23,8 @@ enum Op : unsigned {
 };
 } // namespace sm83
 
-bool decodeZ80(const uint8_t *Mem, uint16_t Addr, Inst &I, std::string *Text);
-bool decodeSM83(const uint8_t *Mem, uint16_t Addr, Inst &I, std::string *Text);
+bool decodeZ80(const uint8_t *Mem, uint16_t Addr, Inst &I);
+bool decodeSM83(const uint8_t *Mem, uint16_t Addr, Inst &I);
 
 } // namespace z80core
 

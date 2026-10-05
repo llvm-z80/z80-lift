@@ -30,10 +30,8 @@ const char *const SM83Names[] = {
 
 const char *z80core::cpuName(Cpu C) { return C == Cpu::Z80 ? "z80" : "sm83"; }
 
-bool z80core::decode(Cpu C, const uint8_t *Mem, uint16_t Addr, Inst &I,
-                     std::string *Text) {
-  return C == Cpu::Z80 ? decodeZ80(Mem, Addr, I, Text)
-                       : decodeSM83(Mem, Addr, I, Text);
+bool z80core::decode(Cpu C, const uint8_t *Mem, uint16_t Addr, Inst &I) {
+  return C == Cpu::Z80 ? decodeZ80(Mem, Addr, I) : decodeSM83(Mem, Addr, I);
 }
 
 unsigned z80core::numOps(Cpu C) {

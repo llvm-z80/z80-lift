@@ -11,25 +11,22 @@ z80-lift takes the linked runtime image and turns each function into LLVM IR
 with an explicit model of the CPU. That IR is then
 
 - **tested**: JIT-compiled and checked against the function's contract.
-- **proved** (planned): checked against the reference with
-  [alive-tv](https://github.com/AliveToolkit/alive2).
+- **proved**: checked against the contract for every input with
+  [Alive2](https://github.com/AliveToolkit/alive2).
 
 ## Building
 
-It needs an upstream LLVM and a clang of the same version.
+Alive2 needs Z3 4.8.5 or later and re2c.
 
 ```sh
-cmake -G Ninja -B build -DLLVM_DIR=<llvm>/lib/cmake/llvm
+git submodule update --init
+cmake -G Ninja -B build
 ninja -C build
 ```
 
-For z80-tester to take the runtime's assembly directly, build against
-llvm-z80, whose LLVM has the Z80 assembler:
-
-```sh
-cmake -G Ninja -B build -DLLVM_DIR=<llvm-z80-build>/lib/cmake/llvm \
-    -DZ80LIFT_TESTER_ASSEMBLER=ON
-```
+The first build also builds LLVM and clang from the `llvm-z80` submodule. To
+use an LLVM that is already built, with its clang, add
+`-DLLVM_DIR=<llvm>/lib/cmake/llvm`.
 
 ## Usage
 
@@ -40,45 +37,37 @@ Every tool assumes a Z80; pass `--cpu=sm83` for SM83 programs.
 It works on a linked ELF; functions are named as in C.
 
 ```sh
-# Disassemble the code reachable from a function, or from every function
-z80-lift decode prog.elf main
-z80-lift decode prog.elf
-
 # Print the lifted IR, optimized or as lifted
-z80-lift lift prog.elf main
-z80-lift lift --raw prog.elf main
+z80-lift prog.elf main
+z80-lift --raw prog.elf main
 ```
 
-### z80-tester
+### z80-test
 
-It tests runtime functions against contracts written as `;@` comments in the
-runtime's assembly.
-[tester/docs/Contracts.md](tester/docs/Contracts.md) describes how to write
-them.
-
-Built with `Z80LIFT_TESTER_ASSEMBLER`, it takes the assembly itself. Given a
-file, it tests the contracts in that file and links the other files of its
-directory as needed.
+It tests or proves runtime functions against contracts written as `;@`
+comments in the runtime's assembly; see
+[tester/docs/Contracts.md](tester/docs/Contracts.md). Given a file, it checks
+the contracts in that file; given a directory, every contract in it.
 
 ```sh
-z80-tester check <llvm-z80>/compiler-rt/lib/builtins/z80
-z80-tester check --cpu=sm83 <llvm-z80>/compiler-rt/lib/builtins/sm83/divhi3.asm
+z80-test <llvm-z80>/compiler-rt/lib/builtins/z80
+z80-test --cpu=sm83 <llvm-z80>/compiler-rt/lib/builtins/sm83/divhi3.asm
 ```
 
-Otherwise it takes the runtime linked into one image per CPU.
+It also takes the runtime linked into one image per CPU.
 
 ```sh
 # Link the runtime of an llvm-z80 build into build/images/
 scripts/import-runtime.sh <llvm-z80-build-dir>
 
 # Test every function that has a contract, or some of them
-z80-tester check build/images/z80-runtime.elf \
+z80-test build/images/z80-runtime.elf \
     --contracts <llvm-z80>/compiler-rt/lib/builtins/z80
-z80-tester check --cpu=sm83 build/images/sm83-runtime.elf \
+z80-test --cpu=sm83 build/images/sm83-runtime.elf \
     --contracts <llvm-z80>/compiler-rt/lib/builtins/sm83 __divhi3 roundf
 
 # Add contracts from a separate file
-z80-tester check build/images/z80-runtime.elf \
+z80-test build/images/z80-runtime.elf \
     --contracts <llvm-z80>/compiler-rt/lib/builtins/z80 --contracts extra.contracts
 ```
 

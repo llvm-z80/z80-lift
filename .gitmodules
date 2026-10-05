@@ -1,0 +1,7 @@
+[submodule "alive2"]
+	path = alive2
+	url = https://github.com/AliveToolkit/alive2.git
+[submodule "llvm-z80"]
+	path = llvm-z80
+	url = https://github.com/llvm-z80/llvm-z80.git
+	shallow = true

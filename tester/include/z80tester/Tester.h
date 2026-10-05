@@ -18,6 +18,14 @@ namespace z80tester {
 
 using U128 = unsigned __int128;
 
+// Memory layout of a call. The image must stay below ArenaLo. Pointer
+// arguments point into the arena; the stack and the result buffer follow.
+inline constexpr uint16_t ArenaLo = 0x8000, ArenaHi = 0xB000;
+inline constexpr uint16_t StackLo = 0xB000, StackTop = 0xC000;
+inline constexpr uint16_t SRetBuf = 0xC000; // up to 16 bytes
+inline constexpr uint32_t WindowHi = 0xC010;
+inline constexpr uint16_t Sentinel = 0xFFF0; // return address of the outer call
+
 /// Defaults for the functions whose contracts do not say how to test them.
 struct TestOptions {
   unsigned Threads = 0;            // 0: one per hardware thread
@@ -91,6 +99,7 @@ struct TestPlan {
   std::vector<DomainCheck> Domains;
   bool Exhaustive = false;
   std::optional<uint64_t> Samples;
+  bool OnlyExamples = false; // a proof covers the other inputs
   std::vector<ExampleCheck> Examples;
 
   // Worked out by finishPlan.

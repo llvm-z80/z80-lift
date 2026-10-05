@@ -1,12 +1,9 @@
-// z80-lift: disassembles runtime functions and lifts them to LLVM IR.
+// z80-lift: lifts runtime functions to LLVM IR.
 
-#include "z80lift/CFG.h"
 #include "z80lift/Lifter.h"
 
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/Format.h"
-#include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/WithColor.h"
 #include "llvm/Support/raw_ostream.h"
@@ -19,25 +16,19 @@ namespace {
 
 cl::OptionCategory Category("z80-lift options");
 
-cl::SubCommand Decode("decode", "Disassemble functions of a runtime image");
-cl::SubCommand Lift("lift", "Print the lifted IR of functions");
-
 cl::opt<std::string> ImagePath(cl::Positional, cl::Required,
-                               cl::desc("<image>"), cl::sub(Decode),
-                               cl::sub(Lift), cl::cat(Category));
+                               cl::desc("<image>"), cl::cat(Category));
 
-cl::list<std::string> Symbols(cl::Positional, cl::desc("<function>..."),
-                              cl::sub(Decode), cl::sub(Lift),
-                              cl::cat(Category));
+cl::list<std::string> Symbols(cl::Positional, cl::OneOrMore,
+                              cl::desc("<function>..."), cl::cat(Category));
 
 cl::opt<Cpu> CpuFlag("cpu", cl::desc("CPU of the program"),
                      cl::values(clEnumValN(Cpu::Z80, "z80", "Z80 (default)"),
                                 clEnumValN(Cpu::SM83, "sm83", "SM83")),
-                     cl::init(Cpu::Z80), cl::sub(cl::SubCommand::getAll()),
-                     cl::cat(Category));
+                     cl::init(Cpu::Z80), cl::cat(Category));
 
 cl::opt<bool> Raw("raw", cl::desc("Print the IR before optimization"),
-                  cl::sub(Lift), cl::cat(Category));
+                  cl::cat(Category));
 
 [[noreturn]] void fail(Error E) {
   WithColor::error(errs(), "z80-lift") << toString(std::move(E)) << '\n';
@@ -62,47 +53,14 @@ uint16_t lookup(const Image &Img, StringRef Name) {
   return 0;
 }
 
-void printInst(Cpu C, const Image &Img, const Inst &I) {
-  std::string Text;
-  Inst Again;
-  decode(C, Img.Mem.data(), I.Addr, Again, &Text);
-  std::string Bytes;
-  for (unsigned K = 0; K < I.Len; ++K)
-    Bytes += formatv("{0:x-2} ", Img.Mem[uint16_t(I.Addr + K)]).str();
-  WithColor(outs(), raw_ostream::BRIGHT_BLACK)
-      << "  " << format_hex_no_prefix(I.Addr, 4) << ": "
-      << left_justify(Bytes, 13);
-  outs() << Text << '\n';
-}
+} // namespace
 
-int runDecode() {
-  Cpu C = CpuFlag;
-  Image Img = check(Image::load(ImagePath));
-  std::vector<uint16_t> Entries;
-  if (Symbols.empty())
-    Entries.assign(Img.Entries.begin(), Img.Entries.end());
-  for (const std::string &Name : Symbols)
-    Entries.push_back(lookup(Img, Name));
+int main(int argc, char **argv) {
+  InitLLVM X(argc, argv);
+  // Only our options; those of the linked LLVM libraries still work.
+  cl::HideUnrelatedOptions(Category);
+  cl::ParseCommandLineOptions(argc, argv, "Z80/SM83 machine code lifter\n");
 
-  std::map<uint16_t, Inst> Insts;
-  for (uint16_t Entry : Entries) {
-    CFG F = check(recoverCFG(C, Img, Entry));
-    for (const auto &[A, B] : F.Blocks)
-      for (const Inst &I : B.Insts)
-        Insts[I.Addr] = I;
-  }
-  for (const auto &[A, I] : Insts) {
-    if (auto It = Img.Names.find(A); It != Img.Names.end()) {
-      WithColor(outs(), raw_ostream::YELLOW, /*Bold=*/true)
-          << It->second << ':';
-      outs() << '\n';
-    }
-    printInst(C, Img, I);
-  }
-  return 0;
-}
-
-int runLift() {
   Cpu C = CpuFlag;
   Image Img = check(Image::load(ImagePath));
   LLVMContext Ctx;
@@ -117,19 +75,4 @@ int runLift() {
     return 1;
   L->module().print(outs(), nullptr);
   return 0;
-}
-
-} // namespace
-
-int main(int argc, char **argv) {
-  InitLLVM X(argc, argv);
-  // Only our options; those of the linked LLVM libraries still work.
-  cl::HideUnrelatedOptions(Category);
-  cl::ParseCommandLineOptions(argc, argv, "Z80/SM83 machine code lifter\n");
-  if (Decode)
-    return runDecode();
-  if (Lift)
-    return runLift();
-  cl::PrintHelpMessage();
-  return 1;
 }

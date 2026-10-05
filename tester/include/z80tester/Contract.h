@@ -116,6 +116,8 @@ struct Contract {
   // How to test it, where the contract says.
   bool Exhaustive = false;
   std::optional<uint64_t> Samples;
+  bool Prove = false;
+  unsigned Unroll = 0; // loop iterations a proof follows; 0 for no loops
   std::vector<Domain> Domains;
   std::vector<Example> Examples;
 
@@ -142,7 +144,8 @@ std::string contractSource(llvm::ArrayRef<Contract> Contracts);
 
 /// Compiles contractSource with the given clang to bitcode.
 llvm::Expected<std::unique_ptr<llvm::MemoryBuffer>>
-compileContracts(llvm::StringRef Source, llvm::StringRef Clang);
+compileContracts(llvm::StringRef Source, llvm::StringRef Clang,
+                 bool Sanitize = true);
 
 } // namespace z80tester
 

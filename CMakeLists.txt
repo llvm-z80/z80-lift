@@ -20,10 +20,27 @@ if("tester" IN_LIST projects AND NOT "lifter" IN_LIST projects)
   list(APPEND projects lifter)
 endif()
 
+list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
+
+# Without LLVM_DIR, LLVM and clang are built from the llvm-z80 submodule.
+if(LLVM_DIR)
+  set(bundled OFF)
+else()
+  set(bundled ON)
+endif()
+option(Z80LIFT_BUNDLED_LLVM
+  "Build LLVM and clang from the llvm-z80 submodule" ${bundled})
+if(Z80LIFT_BUNDLED_LLVM)
+  include(BundledLLVM)
+  z80lift_configure_llvm()
+endif()
+
 find_package(LLVM REQUIRED CONFIG)
 message(STATUS "Using LLVM ${LLVM_PACKAGE_VERSION} from ${LLVM_DIR}")
+if(Z80LIFT_BUNDLED_LLVM)
+  z80lift_add_llvm_target()
+endif()
 
-list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 include(Bitcode)
 
 # Build with the same definitions and RTTI setting as LLVM.
@@ -51,4 +68,8 @@ if("lifter" IN_LIST projects)
 endif()
 if("tester" IN_LIST projects)
   add_subdirectory(tester)
+endif()
+
+if(Z80LIFT_BUNDLED_LLVM)
+  z80lift_depend_on_llvm(${PROJECT_SOURCE_DIR})
 endif()

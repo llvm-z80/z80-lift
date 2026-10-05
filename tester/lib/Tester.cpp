@@ -23,13 +23,6 @@ using namespace z80tester;
 
 namespace {
 
-// Memory layout of a call. The image must stay below ArenaLo. Pointer
-// arguments point into the arena; the stack and the result buffer follow.
-constexpr uint16_t ArenaLo = 0x8000, ArenaHi = 0xB000;
-constexpr uint16_t StackLo = 0xB000, StackTop = 0xC000;
-constexpr uint16_t SRetBuf = 0xC000; // up to 16 bytes
-constexpr uint32_t WindowHi = 0xC010;
-constexpr uint16_t Sentinel = 0xFFF0; // return address of the outer call
 constexpr unsigned MaxValues = 8;
 constexpr unsigned Margin = 16; // random bytes kept around each buffer
 
@@ -216,7 +209,7 @@ extern "C" void onSignal(int Sig) {
     std::signal(Sig, SIG_DFL);
     return;
   }
-  const char Head[] = "z80-tester: error: ";
+  const char Head[] = "z80-test: error: ";
   const char *What = !W ? "illegal instruction"
                      : Sig == SIGILL
                          ? "undefined behaviour in the contract at "
@@ -791,6 +784,7 @@ Expected<TestPlan> z80tester::planTest(Cpu C, const Image &Img,
                              K.where().c_str());
   P.Exhaustive = K.Exhaustive;
   P.Samples = K.Samples;
+  P.OnlyExamples = K.Prove && !K.Samples;
   P.Placed = K.Placed;
 
   auto IsString = [&](unsigned I) {
@@ -916,7 +910,9 @@ TestResult z80tester::runTest(const TestPlan &P, const Image &Img,
       All && (P.Exhaustive ||
               (!P.Samples && (O.MaxExhaustiveBits >= 64 ||
                               *All <= uint64_t(1) << O.MaxExhaustiveBits)));
-  uint64_t Total = Exhaustive ? *All : P.Samples.value_or(O.Samples);
+  uint64_t Total = P.OnlyExamples ? 0
+                   : Exhaustive   ? *All
+                                  : P.Samples.value_or(O.Samples);
 
   unsigned N = O.Threads ? O.Threads : std::thread::hardware_concurrency();
   N = unsigned(std::max<uint64_t>(1, std::min<uint64_t>(N, Total)));

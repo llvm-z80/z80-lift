@@ -5,7 +5,6 @@
 #define Z80CORE_DECODER_H
 
 #include <cstdint>
-#include <string>
 
 namespace z80core {
 
@@ -37,10 +36,9 @@ struct Inst {
   uint16_t next() const { return Addr + Len; }
 };
 
-/// Decodes the instruction at Addr, and its text if Text is given. Fails on
-/// bytes the CPU lacks and on instructions core does not model, such as I/O.
-bool decode(Cpu C, const uint8_t *Mem, uint16_t Addr, Inst &I,
-            std::string *Text = nullptr);
+/// Decodes the instruction at Addr. Fails on bytes the CPU lacks and on
+/// instructions core does not model, such as I/O.
+bool decode(Cpu C, const uint8_t *Mem, uint16_t Addr, Inst &I);
 
 unsigned numOps(Cpu C);
 Kind instKind(Cpu C, unsigned Op);
