@@ -30,30 +30,30 @@ cl::opt<Cpu> CpuFlag("cpu", cl::desc("CPU of the program"),
 cl::opt<bool> Raw("raw", cl::desc("Print the IR before optimization"),
                   cl::cat(Category));
 
-[[noreturn]] void fail(Error E) {
+} // namespace
+
+[[noreturn]] static void fail(Error E) {
   WithColor::error(errs(), "z80-lift") << toString(std::move(E)) << '\n';
   std::exit(1);
 }
 
-void check(Error E) {
+static void check(Error E) {
   if (E)
     fail(std::move(E));
 }
 
-template <typename T> T check(Expected<T> V) {
+template <typename T> static T check(Expected<T> V) {
   if (!V)
     fail(V.takeError());
   return std::move(*V);
 }
 
-uint16_t lookup(const Image &Img, StringRef Name) {
+static uint16_t lookup(const Image &Img, StringRef Name) {
   if (std::optional<uint16_t> A = Img.lookup(Name))
     return *A;
   check(createStringError("no function %s", Name.str().c_str()));
   return 0;
 }
-
-} // namespace
 
 int main(int argc, char **argv) {
   InitLLVM X(argc, argv);

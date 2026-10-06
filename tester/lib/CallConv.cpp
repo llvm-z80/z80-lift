@@ -50,6 +50,7 @@ std::optional<Ty> z80tester::tyFromIR(Type *T) {
     case 32: return Ty::I32;
     case 64: return Ty::I64;
     case 128: return Ty::I128;
+    default: break;
     }
   }
   return std::nullopt;
@@ -59,12 +60,14 @@ namespace {
 
 /// The register table of one target's __sdcccall(1).
 struct Table {
-  std::vector<Reg8> First16, First32, AfterI8_8, AfterI8_16, AfterI16_8,
-      AfterI16_16, Ret8, Ret16, Ret32;
+  std::vector<Reg8> First16, First32, I8AfterI8, I16AfterI8, I8AfterI16,
+      I16AfterI16, Ret8, Ret16, Ret32;
   std::vector<Reg8> Pairs[3]; // Z80_Builtin pool, in order
 };
 
-const Table &table(Cpu C) {
+} // namespace
+
+static const Table &table(Cpu C) {
   static const Table Z80 = {{RH, RL},
                             {RH, RL, RD, RE},
                             {RL},
@@ -88,7 +91,7 @@ const Table &table(Cpu C) {
   return C == Cpu::Z80 ? Z80 : SM83;
 }
 
-std::optional<Loc> retLoc(const Table &Tab, Ty T) {
+static std::optional<Loc> retLoc(const Table &Tab, Ty T) {
   switch (sizeOf(T)) {
   case 1: return Loc{Tab.Ret8, 0, 1};
   case 2: return Loc{Tab.Ret16, 0, 2};
@@ -97,8 +100,8 @@ std::optional<Loc> retLoc(const Table &Tab, Ty T) {
   }
 }
 
-Expected<CallLayout> layoutBuiltin(const Table &Tab, ArrayRef<Ty> Params,
-                                   std::optional<Ty> Ret) {
+static Expected<CallLayout> layoutBuiltin(const Table &Tab, ArrayRef<Ty> Params,
+                                          std::optional<Ty> Ret) {
   CallLayout L;
   bool UsedA = false, Used[3] = {false, false, false};
   for (Ty P : Params) {
@@ -136,8 +139,6 @@ Expected<CallLayout> layoutBuiltin(const Table &Tab, ArrayRef<Ty> Params,
   return L;
 }
 
-} // namespace
-
 Expected<CallLayout> z80tester::layoutCall(Cpu C, CallConv CC,
                                            ArrayRef<Ty> Params,
                                            std::optional<Ty> Ret) {
@@ -152,6 +153,8 @@ Expected<CallLayout> z80tester::layoutCall(Cpu C, CallConv CC,
     Offset = 2;
   } else if (Ret) {
     L.Ret = retLoc(Tab, *Ret);
+    if (!L.Ret)
+      return createStringError("the result does not fit in registers");
   }
 
   // The first two positions may take registers; a position is used up even
@@ -173,12 +176,12 @@ Expected<CallLayout> z80tester::layoutCall(Cpu C, CallConv CC,
       }
     } else if (Pos == 1) {
       if (First == First8)
-        Lc.Regs = Size == 1   ? Tab.AfterI8_8
-                  : Size == 2 ? Tab.AfterI8_16
+        Lc.Regs = Size == 1   ? Tab.I8AfterI8
+                  : Size == 2 ? Tab.I16AfterI8
                               : std::vector<Reg8>{};
       else if (First == First16)
-        Lc.Regs = Size == 1   ? Tab.AfterI16_8
-                  : Size == 2 ? Tab.AfterI16_16
+        Lc.Regs = Size == 1   ? Tab.I8AfterI16
+                  : Size == 2 ? Tab.I16AfterI16
                               : std::vector<Reg8>{};
     }
     if (Lc.Regs.empty()) {

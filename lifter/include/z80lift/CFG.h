@@ -29,9 +29,10 @@ struct CFG {
 };
 
 /// Follows every path from Entry. Control reaching another address in
-/// Img.Entries leaves the function as a tail call.
+/// Img.Entries leaves the function as a tail call. With OutsideLeaves, so
+/// does control reaching an address past the image.
 llvm::Expected<CFG> recoverCFG(z80core::Cpu C, const z80core::Image &Img,
-                               uint16_t Entry);
+                               uint16_t Entry, bool OutsideLeaves = false);
 
 } // namespace z80lift
 

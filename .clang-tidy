@@ -1,0 +1,33 @@
+Checks: >
+  -*,
+  clang-diagnostic-*,
+  clang-analyzer-*,
+  -clang-analyzer-cplusplus.NewDeleteLeaks,
+  -clang-analyzer-security.ArrayBound,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-throwing-static-initialization,
+  performance-*,
+  -performance-enum-size,
+  llvm-*,
+  -llvm-header-guard,
+  misc-*,
+  -misc-const-correctness,
+  -misc-include-cleaner,
+  -misc-no-recursion,
+  -misc-non-private-member-variables-in-classes,
+  -misc-unused-parameters,
+  -misc-use-anonymous-namespace,
+  -misc-use-internal-linkage,
+  readability-else-after-return,
+  readability-identifier-naming,
+  readability-redundant-*
+HeaderFilterRegex: '(^|/)(core|lifter|tester)/'
+CheckOptions:
+  readability-identifier-naming.ClassCase: CamelCase
+  readability-identifier-naming.EnumCase: CamelCase
+  readability-identifier-naming.FunctionCase: camelBack
+  readability-identifier-naming.FunctionIgnoredRegexp: 'z80core_.*'
+  readability-identifier-naming.MemberCase: CamelCase
+  readability-identifier-naming.ParameterCase: CamelCase
+  readability-identifier-naming.VariableCase: CamelCase

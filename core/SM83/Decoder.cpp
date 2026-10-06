@@ -38,7 +38,7 @@ private:
   }
 
   uint16_t rel() {
-    int8_t D = fetch();
+    auto D = int8_t(fetch());
     return Pos + D;
   }
 

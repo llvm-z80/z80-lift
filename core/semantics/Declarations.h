@@ -23,6 +23,7 @@ extern "C" {
 
 unsigned z80core_get_pc(z80core::State *S);
 void z80core_set_pc(z80core::State *S, unsigned PC);
+unsigned z80core_get_sp(z80core::State *S);
 bool z80core_tick(z80core::State *S, unsigned N);
 }
 

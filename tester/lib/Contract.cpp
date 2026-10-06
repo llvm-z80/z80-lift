@@ -24,18 +24,20 @@ namespace {
 const char *const RegNames[] = {"A",  "B",  "C",  "D",  "E",  "H", "L",
                                 "BC", "DE", "HL", "IX", "IY", "SP"};
 
-std::optional<Reg> regNamed(StringRef Name) {
+} // namespace
+
+static std::optional<Reg> regNamed(StringRef Name) {
   for (unsigned I = 0; I < std::size(RegNames); ++I)
     if (Name == RegNames[I])
       return Reg(I);
   return std::nullopt;
 }
 
-bool isIdentStart(char C) { return isAlpha(C) || C == '_'; }
-bool isIdentChar(char C) { return isAlnum(C) || C == '_'; }
+static bool isIdentStart(char C) { return isAlpha(C) || C == '_'; }
+static bool isIdentChar(char C) { return isAlnum(C) || C == '_'; }
 
 /// The identifiers of a C expression, skipping numbers such as 0x1p31f.
-std::vector<StringRef> identifiers(StringRef S) {
+static std::vector<StringRef> identifiers(StringRef S) {
   std::vector<StringRef> Ids;
   size_t I = 0;
   while (I < S.size()) {
@@ -60,7 +62,7 @@ std::vector<StringRef> identifiers(StringRef S) {
 
 /// Types whose size differs between the host the contracts are compiled for
 /// and the Z80.
-Error checkTypes(StringRef Types, const Twine &Where) {
+static Error checkTypes(StringRef Types, const Twine &Where) {
   std::vector<StringRef> Ids = identifiers(Types);
   for (size_t I = 0; I < Ids.size(); ++I) {
     StringRef Id = Ids[I];
@@ -80,12 +82,16 @@ Error checkTypes(StringRef Types, const Twine &Where) {
   return Error::success();
 }
 
+namespace {
+
 struct Param {
   StringRef Type, Name;
 };
 
+} // namespace
+
 /// The parameters in a C parameter list.
-std::vector<Param> parameters(StringRef Params) {
+static std::vector<Param> parameters(StringRef Params) {
   std::vector<Param> Out;
   SmallVector<StringRef> Parts;
   Params.split(Parts, ',');
@@ -99,7 +105,7 @@ std::vector<Param> parameters(StringRef Params) {
 }
 
 /// Splits at the commas outside brackets.
-SmallVector<StringRef> splitArgs(StringRef S) {
+static SmallVector<StringRef> splitArgs(StringRef S) {
   SmallVector<StringRef> Out;
   int Depth = 0;
   size_t Start = 0;
@@ -118,7 +124,7 @@ SmallVector<StringRef> splitArgs(StringRef S) {
 }
 
 /// The index of the parenthesis that closes the one at Open, or npos.
-size_t matchParen(StringRef S, size_t Open) {
+static size_t matchParen(StringRef S, size_t Open) {
   int Depth = 0;
   for (size_t I = Open; I < S.size(); ++I) {
     if (S[I] == '(')
@@ -130,7 +136,7 @@ size_t matchParen(StringRef S, size_t Open) {
 }
 
 /// The outermost `old(...)` calls in a condition, as [start, close] indices.
-std::vector<std::pair<size_t, size_t>> oldCalls(StringRef S) {
+static std::vector<std::pair<size_t, size_t>> oldCalls(StringRef S) {
   std::vector<std::pair<size_t, size_t>> Calls;
   for (size_t I = S.find("old("); I != StringRef::npos;
        I = S.find("old(", I + 1)) {
@@ -147,7 +153,7 @@ std::vector<std::pair<size_t, size_t>> oldCalls(StringRef S) {
 }
 
 /// Bytes of a fixed-width type, or 1 if it is not one.
-unsigned typeBytes(StringRef Type) {
+static unsigned typeBytes(StringRef Type) {
   if (Type.contains('*'))
     return 2;
   std::vector<StringRef> Ids = identifiers(Type);
@@ -165,7 +171,7 @@ unsigned typeBytes(StringRef Type) {
   return 1;
 }
 
-ParamInfo paramInfo(const Param &P) {
+static ParamInfo paramInfo(const Param &P) {
   ParamInfo I;
   I.Name = P.Name.str();
   I.Type = P.Type.str();
@@ -185,7 +191,8 @@ ParamInfo paramInfo(const Param &P) {
 }
 
 /// Registers named one after another, most significant first, such as HLDE.
-Expected<std::vector<Reg>> parseRegs(StringRef S, const std::string &Where) {
+static Expected<std::vector<Reg>> parseRegs(StringRef S,
+                                            const std::string &Where) {
   std::vector<Reg> Regs;
   S = S.trim();
   while (!S.empty()) {
@@ -193,11 +200,12 @@ Expected<std::vector<Reg>> parseRegs(StringRef S, const std::string &Where) {
         S.starts_with("BC") || S.starts_with("DE") || S.starts_with("HL") ? 2
         : strchr("ABCDEHL", S[0])                                         ? 1
                                                                           : 0;
-    if (!Len)
+    std::optional<Reg> R = Len ? regNamed(S.take_front(Len)) : std::nullopt;
+    if (!R)
       return createStringError("%s: '%s' does not start with A to L, BC, DE "
                                "or HL",
                                Where.c_str(), S.str().c_str());
-    Regs.push_back(*regNamed(S.take_front(Len)));
+    Regs.push_back(*R);
     S = S.drop_front(Len);
   }
   if (Regs.empty())
@@ -206,7 +214,7 @@ Expected<std::vector<Reg>> parseRegs(StringRef S, const std::string &Where) {
 }
 
 /// Removes `Name(...)` from S and returns what was in the parentheses.
-std::optional<std::string> takeAttr(std::string &S, StringRef Name) {
+static std::optional<std::string> takeAttr(std::string &S, StringRef Name) {
   size_t At = S.find((Name + "(").str());
   if (At == std::string::npos)
     return std::nullopt;
@@ -218,8 +226,8 @@ std::optional<std::string> takeAttr(std::string &S, StringRef Name) {
   return StringRef(Inside).trim().str();
 }
 
-Expected<unsigned> parseCount(StringRef S, StringRef Attr,
-                              const std::string &Where) {
+static Expected<unsigned> parseCount(StringRef S, StringRef Attr,
+                                     const std::string &Where) {
   unsigned N;
   if (S.getAsInteger(0, N))
     return createStringError("%s: %s needs a byte count", Where.c_str(),
@@ -227,8 +235,8 @@ Expected<unsigned> parseCount(StringRef S, StringRef Attr,
   return N;
 }
 
-Expected<Contract> parsePrototype(StringRef Text, StringRef File,
-                                  unsigned Line) {
+static Expected<Contract> parsePrototype(StringRef Text, StringRef File,
+                                         unsigned Line) {
   std::string Where = (sys::path::filename(File) + ":" + Twine(Line)).str();
   auto NotPrototype = [&] {
     return createStringError("%s: expected a C prototype", Where.c_str());
@@ -340,7 +348,7 @@ Expected<Contract> parsePrototype(StringRef Text, StringRef File,
   return K;
 }
 
-Error finishCondition(Condition &Cond, Cpu C) {
+static Error finishCondition(Condition &Cond, Cpu C) {
   std::vector<std::pair<size_t, size_t>> Olds = oldCalls(Cond.Text);
   Cond.UsesOld = !Olds.empty();
   StringRef Text = Cond.Text;
@@ -362,7 +370,7 @@ Error finishCondition(Condition &Cond, Cpu C) {
 }
 
 /// Splits "lo .. hi" at its `..`.
-std::optional<std::pair<StringRef, StringRef>> splitRange(StringRef S) {
+static std::optional<std::pair<StringRef, StringRef>> splitRange(StringRef S) {
   size_t Dots = S.find("..");
   if (Dots == StringRef::npos)
     return std::nullopt;
@@ -372,7 +380,7 @@ std::optional<std::pair<StringRef, StringRef>> splitRange(StringRef S) {
   return std::pair{Lo, Hi};
 }
 
-std::optional<unsigned> paramNamed(const Contract &K, StringRef Name) {
+static std::optional<unsigned> paramNamed(const Contract &K, StringRef Name) {
   for (unsigned I = 0; I < K.ParamList.size(); ++I)
     if (K.ParamList[I].Name == Name)
       return I;
@@ -380,7 +388,7 @@ std::optional<unsigned> paramNamed(const Contract &K, StringRef Name) {
 }
 
 /// Reads a `modifies` item: `p[lo .. hi]` or `*p`.
-Error applyRange(Contract &K, const Condition &Item) {
+static Error applyRange(Contract &K, const Condition &Item) {
   std::string Where = Item.where();
   StringRef Text = Item.Text;
   Range R;
@@ -420,7 +428,7 @@ Error applyRange(Contract &K, const Condition &Item) {
 }
 
 /// Reads `names in lo .. hi` or `names in string(lo .. hi)`.
-Error applyDomain(Contract &K, const Condition &Item) {
+static Error applyDomain(Contract &K, const Condition &Item) {
   std::string Where = Item.where();
   StringRef Text = Item.Text;
   size_t In = Text.find(" in ");
@@ -464,7 +472,7 @@ Error applyDomain(Contract &K, const Condition &Item) {
 }
 
 /// Reads the items of a contract's `tests`.
-Error applyTests(Contract &K, ArrayRef<Condition> Items) {
+static Error applyTests(Contract &K, ArrayRef<Condition> Items) {
   for (const Condition &Item : Items) {
     std::string Where = Item.where();
     StringRef Word = StringRef(Item.Text).take_while(isIdentChar);
@@ -537,19 +545,24 @@ Error applyTests(Contract &K, ArrayRef<Condition> Items) {
 }
 
 /// An `#include` line, with a quoted path made absolute.
-std::string includeLine(StringRef Text, StringRef File) {
+static std::string includeLine(StringRef Text, StringRef File) {
   StringRef Name = Text.drop_front(strlen("#include")).trim();
   if (!Name.consume_front("\"") || !Name.consume_back("\""))
     return Text.str();
   SmallString<128> Path(sys::path::parent_path(File));
   sys::path::append(Path, Name);
-  sys::fs::make_absolute(Path);
+  if (sys::fs::make_absolute(Path))
+    return Text.str();
   return ("#include \"" + Path + "\"").str();
 }
 
+namespace {
+
 enum class Part { None, Requires, Ensures, Modifies, Tests };
 
-Error parseFile(StringRef Path, Cpu C, std::vector<Contract> &Out) {
+} // namespace
+
+static Error parseFile(StringRef Path, Cpu C, std::vector<Contract> &Out) {
   auto Buf = MemoryBuffer::getFile(Path);
   if (!Buf)
     return createStringError(Buf.getError(), "%s: %s", Path.str().c_str(),
@@ -687,7 +700,7 @@ Error parseFile(StringRef Path, Cpu C, std::vector<Contract> &Out) {
 }
 
 /// A parameter list, or "void" for none.
-std::string paramList(ArrayRef<std::string> Parts) {
+static std::string paramList(ArrayRef<std::string> Parts) {
   std::string S;
   for (const std::string &P : Parts) {
     if (P.empty() || P == "void")
@@ -699,9 +712,11 @@ std::string paramList(ArrayRef<std::string> Parts) {
   return S.empty() ? "void" : S;
 }
 
-std::string lineDirective(unsigned Line, StringRef File) {
+static std::string lineDirective(unsigned Line, StringRef File) {
   return formatv("#line {0} \"{1}\"\n", Line, File).str();
 }
+
+namespace {
 
 // Helpers for conditions. `same` compares floats bit for bit, except that any
 // two NaNs are the same.
@@ -742,9 +757,11 @@ static inline bool z80tester_same16(_Float16 X, _Float16 Y) {
   })
 )";
 
+} // namespace
+
 /// Rewrites each `old(e)` to evaluate e with the pointers and registers as
 /// they were before the call.
-std::string rewriteOld(StringRef Text, StringRef Decls) {
+static std::string rewriteOld(StringRef Text, StringRef Decls) {
   std::string Out;
   size_t From = 0;
   for (auto [At, Close] : oldCalls(Text)) {
@@ -758,11 +775,9 @@ std::string rewriteOld(StringRef Text, StringRef Decls) {
   return Out;
 }
 
-std::string regDecl(Reg R, StringRef Name) {
+static std::string regDecl(Reg R, StringRef Name) {
   return ((regBytes(R) == 1 ? "uint8_t " : "uint16_t ") + Name).str();
 }
-
-} // namespace
 
 const char *z80tester::regName(Reg R) { return RegNames[unsigned(R)]; }
 

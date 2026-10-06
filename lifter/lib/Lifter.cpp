@@ -45,6 +45,7 @@ Expected<std::unique_ptr<Lifter>> Lifter::create(Cpu C, const Image &Img,
   };
   for (auto [Dst, Name] : {std::pair{&L->GetPC, GetPCFunction},
                            {&L->SetPC, SetPCFunction},
+                           {&L->GetSP, GetSPFunction},
                            {&L->Tick, TickFunction}}) {
     auto F = Get(Name);
     if (!F)
@@ -63,7 +64,7 @@ Expected<std::unique_ptr<Lifter>> Lifter::create(Cpu C, const Image &Img,
 Expected<llvm::Function *> Lifter::lift(uint16_t Entry) {
   if (auto It = Lifted.find(Entry); It != Lifted.end())
     return It->second;
-  Expected<CFG> F = recoverCFG(C, Img, Entry);
+  Expected<CFG> F = recoverCFG(C, Img, Entry, JumpsOutsideLeave);
   if (!F)
     return F.takeError();
 
@@ -101,9 +102,12 @@ Error Lifter::buildBody(const CFG &F, llvm::Function *Fn) {
   IRBuilder<>(EntryBB).CreateBr(BBs.at(F.Entry));
 
   // A block of this function, or a tail call into another one.
+  auto Outside = [&](uint16_t A) { return JumpsOutsideLeave && A >= Img.End; };
   auto Succ = [&](uint16_t A) -> Expected<BasicBlock *> {
     if (auto It = BBs.find(A); It != BBs.end())
       return It->second;
+    if (Outside(A))
+      return Exit;
     auto Callee = Lifted.find(A);
     if (Callee == Lifted.end())
       return createStringError("%s: no code at 0x%04x",
@@ -130,13 +134,16 @@ Error Lifter::buildBody(const CFG &F, llvm::Function *Fn) {
     auto *Body = BasicBlock::Create(Ctx, "", Fn);
     B.CreateCondBr(Stop, Exit, Body);
     B.SetInsertPoint(Body);
+    const Inst &Last = Blk.Insts.back();
+    Value *SPBefore = nullptr;
     for (const Inst &I : Blk.Insts) {
       B.CreateCall(SetPC, {S, B.getInt32(I.next())});
+      if (&I == &Last && I.K == Kind::CondRet && TakenReturnsLeave)
+        SPBefore = B.CreateCall(GetSP, {S});
       B.CreateCall(Sem[I.Op], {S, Mem, B.getInt32(I.Args[0]),
                                B.getInt32(I.Args[1]), B.getInt32(I.Args[2])});
     }
 
-    const Inst &Last = Blk.Insts.back();
     uint16_t Next = Last.next();
     switch (Last.K) {
     case Kind::Seq:
@@ -161,6 +168,11 @@ Error Lifter::buildBody(const CFG &F, llvm::Function *Fn) {
       auto Fall = Succ(Next);
       if (!Fall)
         return Fall.takeError();
+      if (Outside(Last.Dest)) {
+        // A call that is taken leaves with PC at its target.
+        Dispatch({{Next, *Fall}});
+        break;
+      }
       if (Last.K == Kind::CondCall) {
         auto *CallBB = BasicBlock::Create(Ctx, "", Fn);
         Dispatch({{Next, *Fall}, {Last.Dest, CallBB}});
@@ -174,7 +186,13 @@ Error Lifter::buildBody(const CFG &F, llvm::Function *Fn) {
       auto Fall = Succ(Next);
       if (!Fall)
         return Fall.takeError();
-      Dispatch({{Next, *Fall}});
+      if (SPBefore) {
+        // A taken return pops its address; one that is not leaves SP alone.
+        Value *SP = B.CreateCall(GetSP, {S});
+        B.CreateCondBr(B.CreateICmpEQ(SP, SPBefore), *Fall, Exit);
+      } else {
+        Dispatch({{Next, *Fall}});
+      }
       break;
     }
     case Kind::Ret:

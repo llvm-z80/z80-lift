@@ -26,12 +26,21 @@ namespace {
 constexpr unsigned MaxValues = 8;
 constexpr unsigned Margin = 16; // random bytes kept around each buffer
 
-uint64_t mix(uint64_t X) {
+} // namespace
+
+static uint64_t mix(uint64_t X) {
   X += 0x9E3779B97F4A7C15ULL;
   X = (X ^ (X >> 30)) * 0xBF58476D1CE4E5B9ULL;
   X = (X ^ (X >> 27)) * 0x94D049BB133111EBULL;
   return X ^ (X >> 31);
 }
+
+/// Stores a host pointer in a slot that a condition reads.
+static void putPointer(uint8_t *Slot, const void *Ptr) {
+  std::memcpy(Slot, static_cast<const void *>(&Ptr), sizeof Ptr);
+}
+
+namespace {
 
 struct Rng {
   uint64_t S;
@@ -47,16 +56,18 @@ struct Rng {
 
 enum Stream : uint64_t { InputStream, ExampleStream, ArenaStream };
 
+} // namespace
+
 /// The random numbers of input K of a stream, whichever thread draws them.
-Rng rngFor(uint64_t Seed, Stream St, uint64_t K) {
+static Rng rngFor(uint64_t Seed, Stream St, uint64_t K) {
   return Rng{mix(mix(Seed ^ mix(St)) + K) | 1};
 }
 
-U128 mask(unsigned Bytes) {
+static U128 mask(unsigned Bytes) {
   return Bytes >= 16 ? ~U128(0) : (U128(1) << (Bytes * 8)) - 1;
 }
 
-uint8_t &reg(State &S, Reg8 R) {
+static uint8_t &reg(State &S, Reg8 R) {
   switch (R) {
   case RA: return S.A;
   case RB: return S.B;
@@ -68,47 +79,47 @@ uint8_t &reg(State &S, Reg8 R) {
   }
 }
 
-void writeRegs(State &S, const std::vector<Reg8> &Regs, U128 V) {
+static void writeRegs(State &S, const std::vector<Reg8> &Regs, U128 V) {
   for (size_t I = 0; I < Regs.size(); ++I)
     reg(S, Regs[Regs.size() - 1 - I]) = uint8_t(V >> (8 * I));
 }
 
-U128 readRegs(State &S, const std::vector<Reg8> &Regs) {
+static U128 readRegs(State &S, const std::vector<Reg8> &Regs) {
   U128 V = 0;
   for (Reg8 R : Regs)
     V = V << 8 | reg(S, R);
   return V;
 }
 
-void writeMem(uint8_t *M, uint16_t A, U128 V, unsigned N) {
+static void writeMem(uint8_t *M, uint16_t A, U128 V, unsigned N) {
   for (unsigned I = 0; I < N; ++I)
     M[uint16_t(A + I)] = uint8_t(V >> (8 * I));
 }
 
-U128 readMem(const uint8_t *M, uint16_t A, unsigned N) {
+static U128 readMem(const uint8_t *M, uint16_t A, unsigned N) {
   U128 V = 0;
   for (unsigned I = N; I-- > 0;)
     V = V << 8 | M[uint16_t(A + I)];
   return V;
 }
 
-bool isFloat(Ty T) { return T == Ty::F32 || T == Ty::F16; }
+static bool isFloat(Ty T) { return T == Ty::F32 || T == Ty::F16; }
 
-U128 signBit(Ty T) { return U128(1) << (sizeOf(T) * 8 - 1); }
+static U128 signBit(Ty T) { return U128(1) << (sizeOf(T) * 8 - 1); }
 
-bool isNaN(Ty T, U128 V) {
+static bool isNaN(Ty T, U128 V) {
   return T == Ty::F32 ? (V & 0x7FFFFFFF) > 0x7F800000 : (V & 0x7FFF) > 0x7C00;
 }
 
 /// Orders values: integers by value, floats by value with -0 just below +0.
-U128 toKey(Ty T, bool Signed, U128 V) {
+static U128 toKey(Ty T, bool Signed, U128 V) {
   U128 S = signBit(T), M = mask(sizeOf(T));
   if (isFloat(T))
     return (V & S) ? (~V & M) : (V | S);
   return Signed ? V ^ S : V;
 }
 
-U128 fromKey(Ty T, bool Signed, U128 K) {
+static U128 fromKey(Ty T, bool Signed, U128 K) {
   U128 S = signBit(T), M = mask(sizeOf(T));
   if (isFloat(T))
     return (K & S) ? (K & ~S) : (~K & M);
@@ -116,7 +127,7 @@ U128 fromKey(Ty T, bool Signed, U128 K) {
 }
 
 /// Inputs worth trying more often than random bits give them.
-std::vector<U128> specials(Ty T) {
+static std::vector<U128> specials(Ty T) {
   std::vector<U128> V;
   switch (T) {
   case Ty::F32:
@@ -152,7 +163,7 @@ std::vector<U128> specials(Ty T) {
   }
 }
 
-std::string formatValue(Ty T, U128 V) {
+static std::string formatValue(Ty T, U128 V) {
   unsigned Digits = sizeOf(T) * 2;
   std::string S = "0x";
   for (unsigned I = Digits; I-- > 0;)
@@ -168,7 +179,7 @@ std::string formatValue(Ty T, U128 V) {
   return S;
 }
 
-U128 regValue(const State &S, Reg R) {
+static U128 regValue(const State &S, Reg R) {
   switch (R) {
   case Reg::A: return S.A;
   case Reg::B: return S.B;
@@ -187,7 +198,7 @@ U128 regValue(const State &S, Reg R) {
   return 0;
 }
 
-std::string formatString(const std::string &Bytes) {
+static std::string formatString(const std::string &Bytes) {
   std::string S = "\"";
   size_t N = Bytes.empty() ? 0 : Bytes.size() - 1; // without the NUL
   for (size_t I = 0; I < N && I < 24; ++I) {
@@ -200,10 +211,14 @@ std::string formatString(const std::string &Bytes) {
   return S + (N > 24 ? "\"..." : "\"");
 }
 
+namespace {
+
 // The part of a contract being evaluated, for reporting a trap in it.
 thread_local const char *Evaluating = nullptr;
 
-extern "C" void onSignal(int Sig) {
+} // namespace
+
+static void onSignal(int Sig) {
   const char *W = Evaluating;
   if (!W && Sig != SIGILL) {
     std::signal(Sig, SIG_DFL);
@@ -223,20 +238,21 @@ extern "C" void onSignal(int Sig) {
 }
 
 /// Calls a compiled part of a contract, naming it if it traps.
-void call(AdapterFn Fn, const std::string &Where, const void *Slots,
-          void *Out) {
+static void call(AdapterFn Fn, const std::string &Where, const void *Slots,
+                 void *Out) {
   Evaluating = Where.c_str();
   Fn(Slots, Out);
   Evaluating = nullptr;
 }
 
-bool evaluate(const Check &C, const void *Slots) {
+static bool evaluate(const Check &C, const void *Slots) {
   alignas(16) uint8_t Out[16] = {};
   call(C.Fn, C.Where, Slots, Out);
   return Out[0];
 }
 
-int64_t bound(AdapterFn Fn, const std::string &Where, const void *Slots) {
+static int64_t bound(AdapterFn Fn, const std::string &Where,
+                     const void *Slots) {
   alignas(16) uint8_t Out[16] = {};
   call(Fn, Where, Slots, Out);
   int64_t V;
@@ -245,7 +261,7 @@ int64_t bound(AdapterFn Fn, const std::string &Where, const void *Slots) {
 }
 
 /// The number of inputs there are, if it is below 2^64.
-std::optional<uint64_t> allInputs(const TestPlan &P) {
+static std::optional<uint64_t> allInputs(const TestPlan &P) {
   U128 Total = 1;
   for (size_t I = 0; I < P.Params.size(); ++I) {
     const Draw &D = P.Draws[I];
@@ -264,6 +280,8 @@ std::optional<uint64_t> allInputs(const TestPlan &P) {
   }
   return uint64_t(Total);
 }
+
+namespace {
 
 /// One input: a value for each parameter, an address for a pointer, and the
 /// bytes a pointer's buffer starts with, if any.
@@ -348,8 +366,9 @@ private:
     for (size_t I = 0; I < P.Params.size(); ++I) {
       if (I)
         S += ", ";
-      if (P.Info[I].Pointer && In.Content[I])
-        S += formatString(*In.Content[I]);
+      const std::optional<std::string> &Content = In.Content[I];
+      if (P.Info[I].Pointer && Content)
+        S += formatString(*Content);
       else
         S += formatValue(P.Params[I], In.Vals[I]);
     }
@@ -374,8 +393,9 @@ private:
     std::string S;
     const std::string *Earlier = nullptr;
     for (size_t J = 0; J < Param; ++J)
-      if (P.Draws[J].K == Draw::String && In.Content[J])
-        Earlier = &*In.Content[J];
+      if (const std::optional<std::string> &Content = In.Content[J];
+          P.Draws[J].K == Draw::String && Content)
+        Earlier = &*Content;
     if (Earlier && G.below(2)) {
       size_t Most = std::min<size_t>(Earlier->size() - 1, Len);
       S = Earlier->substr(0, G.below(2) ? Most : G.below(Most + 1));
@@ -434,8 +454,7 @@ private:
         continue;
       }
       uint16_t A = uint16_t(In.Vals[I]);
-      void *Ptr = Before ? preAt(A) : &Mem[A];
-      std::memcpy(Slots[I], &Ptr, sizeof Ptr);
+      putPointer(Slots[I], Before ? preAt(A) : &Mem[A]);
     }
   }
 
@@ -445,8 +464,9 @@ private:
   bool place(Input &In, Rng &G) {
     int64_t Lo[MaxValues] = {}, Hi[MaxValues] = {};
     for (size_t I = 0; I < P.Params.size(); ++I)
-      if (P.Info[I].Pointer)
-        Hi[I] = In.Content[I] ? In.Content[I]->size() : P.Info[I].Pointee;
+      if (const std::optional<std::string> &Content = In.Content[I];
+          P.Info[I].Pointer)
+        Hi[I] = int64_t(Content ? Content->size() : P.Info[I].Pointee);
     if (llvm::any_of(P.Ranges, [](const RangeCheck &R) { return R.Sizes; })) {
       alignas(16) uint8_t Slots[MaxValues][16] = {};
       for (size_t I = 0; I < P.Params.size(); ++I) {
@@ -454,8 +474,8 @@ private:
           std::memcpy(Slots[I], &In.Vals[I], 16);
           continue;
         }
-        const char *Ptr = In.Content[I] ? In.Content[I]->data() : nullptr;
-        std::memcpy(Slots[I], &Ptr, sizeof Ptr);
+        const std::optional<std::string> &Content = In.Content[I];
+        putPointer(Slots[I], Content ? Content->data() : nullptr);
       }
       for (const RangeCheck &Rg : P.Ranges) {
         if (!Rg.Sizes)
@@ -496,9 +516,10 @@ private:
     for (const Spot &S : Spots)
       fill(S.Start - Margin, S.Start + S.Size + Margin, G);
     for (size_t I = 0; I < P.Params.size(); ++I)
-      if (P.Info[I].Pointer && In.Content[I])
-        std::memcpy(&Mem[uint16_t(In.Vals[I])], In.Content[I]->data(),
-                    In.Content[I]->size());
+      if (const std::optional<std::string> &Content = In.Content[I];
+          P.Info[I].Pointer && Content)
+        std::memcpy(&Mem[uint16_t(In.Vals[I])], Content->data(),
+                    Content->size());
     return true;
   }
 
@@ -633,17 +654,16 @@ private:
     ++R.Checked;
 
     U128 Result = 0;
-    if (P.Ret)
-      Result = L.SRet ? readMem(M, SRetBuf, sizeOf(*P.Ret))
-                      : readRegs(S, L.Ret->Regs);
+    if (const std::optional<Ty> &Ret = P.Ret)
+      Result =
+          L.Ret ? readRegs(S, L.Ret->Regs) : readMem(M, SRetBuf, sizeOf(*Ret));
     for (const Check &E : P.Ensures) {
       // The result, the arguments, the registers, and for old() the pointers
       // into memory as it was and the registers as they were.
       alignas(16) uint8_t Slots[1 + 2 * MaxValues + 2 * 13][16] = {};
       unsigned N = 0;
       if (P.Ret == Ty::Ptr) {
-        void *Ptr = Result ? M + uint16_t(Result) : nullptr;
-        std::memcpy(Slots[N++], &Ptr, sizeof Ptr);
+        putPointer(Slots[N++], Result ? M + uint16_t(Result) : nullptr);
       } else if (P.Ret) {
         std::memcpy(Slots[N++], &Result, 16);
       }
@@ -657,8 +677,7 @@ private:
         for (size_t I = 0; I < P.Params.size(); ++I) {
           if (!P.Info[I].Pointer)
             continue;
-          void *Ptr = preAt(uint16_t(In.Vals[I]));
-          std::memcpy(Slots[N++], &Ptr, sizeof Ptr);
+          putPointer(Slots[N++], preAt(uint16_t(In.Vals[I])));
         }
         for (Reg Rg : E.Cond->OldRegs) {
           U128 V = regValue(Before, Rg);
@@ -740,6 +759,8 @@ static Expected<CallLayout> placeCall(const Contract &K, ArrayRef<Ty> Params,
     L.Params.push_back(Lc);
   }
   if (Ret) {
+    if (!K.RetPlace)
+      return createStringError("%s: the result has no place", Where.c_str());
     Loc Lc;
     Lc.Size = sizeOf(*Ret);
     Lc.Regs = Expand(K.RetPlace->Regs);
@@ -889,7 +910,7 @@ Error z80tester::finishPlan(TestPlan &P) {
       call(Fn, E.Where, nullptr, Out);
       if (P.Info[I].Pointer) {
         const char *Str;
-        std::memcpy(&Str, Out, sizeof Str);
+        std::memcpy(static_cast<void *>(&Str), Out, sizeof Str);
         EV.Strings.push_back({I, std::string(Str ? Str : "") + '\0'});
       } else {
         U128 V;

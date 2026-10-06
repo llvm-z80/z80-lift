@@ -6,14 +6,18 @@ using namespace llvm;
 using namespace z80core;
 using namespace z80lift;
 
-Expected<CFG> z80lift::recoverCFG(Cpu C, const Image &Img, uint16_t Entry) {
+Expected<CFG> z80lift::recoverCFG(Cpu C, const Image &Img, uint16_t Entry,
+                                  bool OutsideLeaves) {
   CFG F;
   F.Entry = Entry;
   std::map<uint16_t, Inst> Insts;
   std::set<uint16_t> Leaders = {Entry};
   std::vector<uint16_t> Work = {Entry};
 
+  auto Outside = [&](uint16_t A) { return OutsideLeaves && A >= Img.End; };
   auto Leaves = [&](uint16_t A) {
+    if (Outside(A))
+      return true;
     if (A != Entry && Img.Entries.count(A)) {
       F.Callees.insert(A);
       return true;
@@ -49,7 +53,8 @@ Expected<CFG> z80lift::recoverCFG(Cpu C, const Image &Img, uint16_t Entry) {
         break;
       case Kind::Call:
       case Kind::CondCall:
-        F.Callees.insert(I.Dest);
+        if (!Outside(I.Dest))
+          F.Callees.insert(I.Dest);
         Leaders.insert(I.next());
         break;
       case Kind::CondRet: Leaders.insert(I.next()); break;

@@ -20,10 +20,8 @@ Expected<std::unique_ptr<Jit>> Jit::create() {
   return Result;
 }
 
-namespace {
-
 /// Emits `void @z80tester.adapt.<F>(ptr %args, ptr %ret)` around F.
-void emitAdapter(llvm::Function &F) {
+static void emitAdapter(llvm::Function &F) {
   Module &M = *F.getParent();
   LLVMContext &Ctx = M.getContext();
   auto *Ptr = PointerType::getUnqual(Ctx);
@@ -33,8 +31,8 @@ void emitAdapter(llvm::Function &F) {
   IRBuilder<> B(BasicBlock::Create(Ctx, "", A));
   SmallVector<Value *> Args;
   for (Argument &Arg : F.args()) {
-    Value *Slot =
-        B.CreateConstGEP1_64(B.getInt8Ty(), A->getArg(0), Arg.getArgNo() * 16);
+    Value *Slot = B.CreateConstGEP1_64(B.getInt8Ty(), A->getArg(0),
+                                       uint64_t(Arg.getArgNo()) * 16);
     Args.push_back(B.CreateLoad(Arg.getType(), Slot));
   }
   CallInst *Call = B.CreateCall(&F, Args);
@@ -47,8 +45,6 @@ void emitAdapter(llvm::Function &F) {
   }
   B.CreateRetVoid();
 }
-
-} // namespace
 
 Expected<std::map<std::string, Signature>>
 Jit::addBitcode(MemoryBufferRef Bitcode, ArrayRef<std::string> Adapt,

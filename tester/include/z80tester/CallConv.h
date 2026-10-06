@@ -14,7 +14,7 @@
 
 namespace llvm {
 class Type;
-}
+} // namespace llvm
 
 namespace z80tester {
 

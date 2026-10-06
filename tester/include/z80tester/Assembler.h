@@ -26,8 +26,8 @@ public:
   static llvm::Expected<AsmLibrary> assemble(z80core::Cpu C,
                                              llvm::ArrayRef<std::string> Files);
 
-  AsmLibrary(AsmLibrary &&);
-  AsmLibrary &operator=(AsmLibrary &&);
+  AsmLibrary(AsmLibrary &&) noexcept;
+  AsmLibrary &operator=(AsmLibrary &&) noexcept;
   ~AsmLibrary();
 
   /// Whether a file defines the symbol, by its assembler name or its C name.

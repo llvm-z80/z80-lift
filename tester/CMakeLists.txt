@@ -23,6 +23,7 @@ set(sources
   lib/CallConv.cpp
   lib/Contract.cpp
   lib/Jit.cpp
+  lib/Rules.cpp
   lib/Tester.cpp)
 set(components Core BitReader OrcJIT native)
 if(Z80LIFT_TESTER_ASSEMBLER)

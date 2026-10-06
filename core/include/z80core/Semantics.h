@@ -24,11 +24,12 @@ llvm::StringRef semanticsBitcode();
 std::string semanticsFunction(Cpu C, unsigned Op);
 
 /// Helpers in the bitcode, so that generated code need not know State's
-/// layout: `unsigned get_pc(State *)`, `void set_pc(State *, unsigned)` and
-/// `bool tick(State *, unsigned N)`, which counts N instructions and returns
-/// whether execution has to stop.
+/// layout: `unsigned get_pc(State *)`, `void set_pc(State *, unsigned)`,
+/// `unsigned get_sp(State *)` and `bool tick(State *, unsigned N)`, which
+/// counts N instructions and returns whether execution has to stop.
 inline constexpr const char *GetPCFunction = "z80core_get_pc";
 inline constexpr const char *SetPCFunction = "z80core_set_pc";
+inline constexpr const char *GetSPFunction = "z80core_get_sp";
 inline constexpr const char *TickFunction = "z80core_tick";
 
 } // namespace z80core

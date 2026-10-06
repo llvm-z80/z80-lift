@@ -34,7 +34,7 @@ Expected<Image> Image::load(StringRef Path) {
     Expected<StringRef> Data = Sec.getContents();
     if (!Data)
       return Data.takeError();
-    std::copy(Data->begin(), Data->end(), Img.Mem.begin() + Addr);
+    std::copy(Data->begin(), Data->end(), Img.Mem.data() + Addr);
   }
 
   for (const object::SymbolRef &Sym : Obj->symbols()) {

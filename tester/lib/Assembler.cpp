@@ -36,10 +36,8 @@ struct AsmLibrary::Object {
   std::unique_ptr<object::ObjectFile> Obj;
 };
 
-namespace {
-
 /// Assembles a file to an ELF object, as `llvm-mc -filetype=obj` does.
-Expected<std::unique_ptr<MemoryBuffer>>
+static Expected<std::unique_ptr<MemoryBuffer>>
 assembleFile(const Target &T, const Triple &TT, StringRef Path) {
   auto Buf = MemoryBuffer::getFile(Path);
   if (!Buf)
@@ -75,14 +73,14 @@ assembleFile(const Target &T, const Triple &TT, StringRef Path) {
                                         Path);
 }
 
-void write16(uint8_t *Loc, uint64_t V) {
+static void write16(uint8_t *Loc, uint64_t V) {
   Loc[0] = V;
   Loc[1] = V >> 8;
 }
 
 /// Applies a relocation as lld's Z80 port does. V is S + A, less P for the
 /// PC-relative ones.
-bool relocate(uint8_t *Loc, uint32_t Type, int64_t V) {
+static bool relocate(uint8_t *Loc, uint32_t Type, int64_t V) {
   auto Fits = [&](unsigned Bits) {
     return isIntN(Bits, V) || isUIntN(Bits, V);
   };
@@ -113,9 +111,11 @@ bool relocate(uint8_t *Loc, uint32_t Type, int64_t V) {
     for (unsigned I = 0; I < (Type == ELF::R_Z80_FK_DATA_4 ? 4 : 8); ++I)
       Loc[I] = uint64_t(V) >> (8 * I);
     return true;
+  default: return false;
   }
-  return false;
 }
+
+namespace {
 
 struct Symbol {
   std::string Name;
@@ -125,7 +125,9 @@ struct Symbol {
   uint64_t Value = 0;
 };
 
-Expected<Symbol> readSymbol(const object::SymbolRef &Sym) {
+} // namespace
+
+static Expected<Symbol> readSymbol(const object::SymbolRef &Sym) {
   Symbol S{"", 0, object::SymbolRef::ST_Unknown,
            Sym.getObject()->section_end()};
   Expected<StringRef> Name = Sym.getName();
@@ -151,16 +153,14 @@ Expected<Symbol> readSymbol(const object::SymbolRef &Sym) {
   return S;
 }
 
-bool isDefinedGlobal(const Symbol &S) {
+static bool isDefinedGlobal(const Symbol &S) {
   return !S.Name.empty() && !(S.Flags & object::SymbolRef::SF_Undefined) &&
          (S.Flags & object::SymbolRef::SF_Global);
 }
 
-} // namespace
-
 AsmLibrary::AsmLibrary() = default;
-AsmLibrary::AsmLibrary(AsmLibrary &&) = default;
-AsmLibrary &AsmLibrary::operator=(AsmLibrary &&) = default;
+AsmLibrary::AsmLibrary(AsmLibrary &&) noexcept = default;
+AsmLibrary &AsmLibrary::operator=(AsmLibrary &&) noexcept = default;
 AsmLibrary::~AsmLibrary() = default;
 
 Expected<AsmLibrary> AsmLibrary::assemble(Cpu C, ArrayRef<std::string> Files) {

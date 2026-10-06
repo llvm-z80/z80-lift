@@ -15,25 +15,27 @@ enum R16 { BC, DE, HL, SP, AF };
 enum Alu { ADD, ADC, SUB, SBC, AND, XOR, OR, CP };
 enum Rot { RLC, RRC, RL, RR, SLA, SRA, SWAP, SRL };
 
-uint16_t hl(State *S) { return pair(S->H, S->L); }
+} // namespace
 
-void setHL(State *S, uint16_t V) {
+static uint16_t hl(State *S) { return pair(S->H, S->L); }
+
+static void setHL(State *S, uint16_t V) {
   S->H = V >> 8;
   S->L = V;
 }
 
-uint8_t getF(State *S) {
+static uint8_t getF(State *S) {
   return S->ZF << 7 | S->NF << 6 | S->HF << 5 | S->CF << 4;
 }
 
-void setF(State *S, uint8_t F) {
+static void setF(State *S, uint8_t F) {
   S->ZF = F & 0x80;
   S->NF = F & 0x40;
   S->HF = F & 0x20;
   S->CF = F & 0x10;
 }
 
-uint8_t get8(State *S, uint8_t *M, unsigned R) {
+static uint8_t get8(State *S, uint8_t *M, unsigned R) {
   switch (R) {
   case B: return S->B;
   case C: return S->C;
@@ -46,7 +48,7 @@ uint8_t get8(State *S, uint8_t *M, unsigned R) {
   }
 }
 
-void set8(State *S, uint8_t *M, unsigned R, uint8_t V) {
+static void set8(State *S, uint8_t *M, unsigned R, uint8_t V) {
   switch (R) {
   case B: S->B = V; return;
   case C: S->C = V; return;
@@ -59,7 +61,7 @@ void set8(State *S, uint8_t *M, unsigned R, uint8_t V) {
   }
 }
 
-uint16_t get16(State *S, unsigned R) {
+static uint16_t get16(State *S, unsigned R) {
   switch (R) {
   case BC: return pair(S->B, S->C);
   case DE: return pair(S->D, S->E);
@@ -69,7 +71,7 @@ uint16_t get16(State *S, unsigned R) {
   }
 }
 
-void set16(State *S, unsigned R, uint16_t V) {
+static void set16(State *S, unsigned R, uint16_t V) {
   uint8_t Hi = V >> 8, Lo = V;
   switch (R) {
   case BC:
@@ -92,7 +94,7 @@ void set16(State *S, unsigned R, uint16_t V) {
   }
 }
 
-bool cond(State *S, unsigned CC) {
+static bool cond(State *S, unsigned CC) {
   switch (CC) {
   case 0: return !S->ZF;
   case 1: return S->ZF;
@@ -101,7 +103,7 @@ bool cond(State *S, unsigned CC) {
   }
 }
 
-void alu(State *S, unsigned Op, uint8_t V) {
+static void alu(State *S, unsigned Op, uint8_t V) {
   uint8_t X = S->A;
   switch (Op) {
   case ADD:
@@ -147,7 +149,7 @@ void alu(State *S, unsigned Op, uint8_t V) {
   S->CF = false;
 }
 
-uint8_t rot(State *S, unsigned Op, uint8_t V) {
+static uint8_t rot(State *S, unsigned Op, uint8_t V) {
   bool Out;
   uint8_t R;
   switch (Op) {
@@ -191,15 +193,13 @@ uint8_t rot(State *S, unsigned Op, uint8_t V) {
 }
 
 /// Flags of ADD SP,e and LD HL,SP+e come from the low byte.
-uint16_t addSP(State *S, unsigned E) {
+static uint16_t addSP(State *S, unsigned E) {
   uint8_t U = E;
   S->HF = (S->SP & 0xF) + (U & 0xF) > 0xF;
   S->CF = (S->SP & 0xFF) + U > 0xFF;
   S->ZF = S->NF = false;
   return S->SP + int8_t(U);
 }
-
-} // namespace
 
 #define SEM(Name)                                                              \
   extern "C" void sm83_##Name(State *S, uint8_t *M, unsigned a, unsigned b,    \

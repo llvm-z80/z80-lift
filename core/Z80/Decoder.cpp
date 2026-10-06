@@ -13,7 +13,11 @@ enum R8 { B, C, D, E, H, L, MHL, A, IXH, IXL, IYH, IYL, MIX, MIY };
 enum R16 { BC, DE, HL, SP, AF, IX, IY };
 enum Prefix { NoPrefix, PrefixIX, PrefixIY };
 
-bool isIndexed(unsigned R) { return R == MIX || R == MIY; }
+} // namespace
+
+static bool isIndexed(unsigned R) { return R == MIX || R == MIY; }
+
+namespace {
 
 class Decoder {
 public:
@@ -49,7 +53,7 @@ private:
   }
 
   uint16_t rel() {
-    int8_t D = fetch();
+    auto D = int8_t(fetch());
     return Pos + D;
   }
 

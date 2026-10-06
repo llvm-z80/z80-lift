@@ -24,6 +24,15 @@ public:
   /// Lifts the function at Entry and every function it reaches.
   llvm::Expected<llvm::Function *> lift(uint16_t Entry);
 
+  /// Makes a conditional return that is taken leave the function even when it
+  /// returns to the next instruction, as for code that is not at the address
+  /// it runs at. Applies to the functions lifted after it.
+  void setTakenReturnsLeave(bool V) { TakenReturnsLeave = V; }
+
+  /// Makes a jump or call to an address past the image leave the function
+  /// for it, rather than fail for want of code there.
+  void setJumpsOutsideLeave(bool V) { JumpsOutsideLeave = V; }
+
   /// Drops the semantics nothing calls.
   void prune();
 
@@ -43,7 +52,10 @@ private:
   z80core::Cpu C;
   const z80core::Image &Img;
   std::unique_ptr<llvm::Module> M;
-  llvm::Function *GetPC = nullptr, *SetPC = nullptr, *Tick = nullptr;
+  llvm::Function *GetPC = nullptr, *SetPC = nullptr, *GetSP = nullptr,
+                 *Tick = nullptr;
+  bool TakenReturnsLeave = false;
+  bool JumpsOutsideLeave = false;
   std::vector<llvm::Function *> Sem; // indexed by Op
   std::map<uint16_t, llvm::Function *> Lifted;
 };

@@ -15,16 +15,18 @@ enum R16 { BC, DE, HL, SP, AF, IX, IY };
 enum Alu { ADD, ADC, SUB, SBC, AND, XOR, OR, CP };
 enum Rot { RLC, RRC, RL, RR, SLA, SRA, SLL, SRL };
 
-uint16_t hl(State *S) { return pair(S->H, S->L); }
-uint16_t ix(State *S) { return pair(S->IXH, S->IXL); }
-uint16_t iy(State *S) { return pair(S->IYH, S->IYL); }
+} // namespace
 
-uint8_t getF(State *S) {
+static uint16_t hl(State *S) { return pair(S->H, S->L); }
+static uint16_t ix(State *S) { return pair(S->IXH, S->IXL); }
+static uint16_t iy(State *S) { return pair(S->IYH, S->IYL); }
+
+static uint8_t getF(State *S) {
   return S->SF << 7 | S->ZF << 6 | S->HF << 4 | S->PVF << 2 | S->NF << 1 |
          S->CF;
 }
 
-void setF(State *S, uint8_t F) {
+static void setF(State *S, uint8_t F) {
   S->SF = F & 0x80;
   S->ZF = F & 0x40;
   S->HF = F & 0x10;
@@ -33,7 +35,7 @@ void setF(State *S, uint8_t F) {
   S->CF = F & 0x01;
 }
 
-uint16_t addr(State *S, unsigned R, unsigned Disp) {
+static uint16_t addr(State *S, unsigned R, unsigned Disp) {
   switch (R) {
   case MIX: return ix(S) + int8_t(Disp);
   case MIY: return iy(S) + int8_t(Disp);
@@ -41,7 +43,7 @@ uint16_t addr(State *S, unsigned R, unsigned Disp) {
   }
 }
 
-uint8_t get8(State *S, uint8_t *M, unsigned R, unsigned Disp) {
+static uint8_t get8(State *S, uint8_t *M, unsigned R, unsigned Disp) {
   switch (R) {
   case B: return S->B;
   case C: return S->C;
@@ -58,7 +60,7 @@ uint8_t get8(State *S, uint8_t *M, unsigned R, unsigned Disp) {
   }
 }
 
-void set8(State *S, uint8_t *M, unsigned R, unsigned Disp, uint8_t V) {
+static void set8(State *S, uint8_t *M, unsigned R, unsigned Disp, uint8_t V) {
   switch (R) {
   case B: S->B = V; return;
   case C: S->C = V; return;
@@ -75,7 +77,7 @@ void set8(State *S, uint8_t *M, unsigned R, unsigned Disp, uint8_t V) {
   }
 }
 
-uint16_t get16(State *S, unsigned R) {
+static uint16_t get16(State *S, unsigned R) {
   switch (R) {
   case BC: return pair(S->B, S->C);
   case DE: return pair(S->D, S->E);
@@ -87,7 +89,7 @@ uint16_t get16(State *S, unsigned R) {
   }
 }
 
-void set16(State *S, unsigned R, uint16_t V) {
+static void set16(State *S, unsigned R, uint16_t V) {
   uint8_t Hi = V >> 8, Lo = V;
   switch (R) {
   case BC:
@@ -118,7 +120,7 @@ void set16(State *S, unsigned R, uint16_t V) {
   }
 }
 
-bool cond(State *S, unsigned CC) {
+static bool cond(State *S, unsigned CC) {
   switch (CC) {
   case 0: return !S->ZF;
   case 1: return S->ZF;
@@ -131,13 +133,13 @@ bool cond(State *S, unsigned CC) {
   }
 }
 
-void szp(State *S, uint8_t V) {
+static void szp(State *S, uint8_t V) {
   S->SF = V & 0x80;
   S->ZF = V == 0;
   S->PVF = parity(V);
 }
 
-void alu(State *S, unsigned Op, uint8_t V) {
+static void alu(State *S, unsigned Op, uint8_t V) {
   uint8_t X = S->A;
   switch (Op) {
   case ADD:
@@ -187,7 +189,7 @@ void alu(State *S, unsigned Op, uint8_t V) {
   S->CF = false;
 }
 
-uint8_t rot(State *S, unsigned Op, uint8_t V) {
+static uint8_t rot(State *S, unsigned Op, uint8_t V) {
   bool Out;
   uint8_t R;
   switch (Op) {
@@ -231,7 +233,7 @@ uint8_t rot(State *S, unsigned Op, uint8_t V) {
   return R;
 }
 
-uint8_t inc8(State *S, uint8_t V) {
+static uint8_t inc8(State *S, uint8_t V) {
   uint8_t R = V + 1;
   S->HF = (V & 0xF) == 0xF;
   S->PVF = V == 0x7F;
@@ -241,7 +243,7 @@ uint8_t inc8(State *S, uint8_t V) {
   return R;
 }
 
-uint8_t dec8(State *S, uint8_t V) {
+static uint8_t dec8(State *S, uint8_t V) {
   uint8_t R = V - 1;
   S->HF = (V & 0xF) == 0;
   S->PVF = V == 0x80;
@@ -251,7 +253,7 @@ uint8_t dec8(State *S, uint8_t V) {
   return R;
 }
 
-void ldx(State *S, uint8_t *M, int Dir) {
+static void ldx(State *S, uint8_t *M, int Dir) {
   uint16_t Src = hl(S), Dst = get16(S, DE), Count = get16(S, BC) - 1;
   write8(S, M, Dst, M[Src]);
   set16(S, HL, Src + Dir);
@@ -262,7 +264,7 @@ void ldx(State *S, uint8_t *M, int Dir) {
   S->NF = false;
 }
 
-void cpx(State *S, uint8_t *M, int Dir) {
+static void cpx(State *S, uint8_t *M, int Dir) {
   uint16_t Src = hl(S), Count = get16(S, BC) - 1;
   uint8_t V = M[Src], R = S->A - V;
   S->HF = (S->A & 0xF) < (V & 0xF);
@@ -273,8 +275,6 @@ void cpx(State *S, uint8_t *M, int Dir) {
   set16(S, BC, Count);
   S->PVF = Count != 0;
 }
-
-} // namespace
 
 #define SEM(Name)                                                              \
   extern "C" void z80_##Name(State *S, uint8_t *M, unsigned a, unsigned b,     \

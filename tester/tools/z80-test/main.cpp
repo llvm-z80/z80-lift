@@ -1,5 +1,5 @@
 // z80-test: runs lifted runtime functions against the contracts in their
-// assembly.
+// assembly, or proves rewrite rules.
 
 #include "z80tester/Tester.h"
 #ifdef Z80TESTER_ALIVE2
@@ -11,8 +11,10 @@
 
 #include "z80lift/Lifter.h"
 
+#include "llvm/ADT/APInt.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/FileUtilities.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/InitLLVM.h"
@@ -20,7 +22,9 @@
 #include "llvm/Support/WithColor.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <optional>
 #include <set>
+#include <tuple>
 
 using namespace llvm;
 using namespace z80core;
@@ -32,12 +36,14 @@ cl::OptionCategory Category("z80-test options");
 
 cl::opt<std::string>
     InputPath(cl::Positional, cl::Required,
-              cl::desc("<linked image, or assembly file or directory>"),
+              cl::desc("<linked image, assembly file or directory, or "
+                       "rules file>"),
               cl::cat(Category));
 
 cl::list<std::string>
     Names(cl::Positional,
-          cl::desc("<function>... (default: every function with a contract)"),
+          cl::desc("<function or rule>... (default: every function with a "
+                   "contract, or every rule)"),
           cl::cat(Category));
 
 cl::opt<Cpu> CpuFlag("cpu", cl::desc("CPU of the program"),
@@ -86,34 +92,36 @@ cl::opt<unsigned> SmtMemory("smt-memory",
                             cl::desc("Megabytes the SMT solver may use"),
                             cl::init(16384), cl::cat(Category));
 
-[[noreturn]] void fail(Error E) {
+} // namespace
+
+[[noreturn]] static void fail(Error E) {
   WithColor::error(errs(), "z80-test") << toString(std::move(E)) << '\n';
   std::exit(1);
 }
 
-void check(Error E) {
+static void check(Error E) {
   if (E)
     fail(std::move(E));
 }
 
-template <typename T> T check(Expected<T> V) {
+template <typename T> static T check(Expected<T> V) {
   if (!V)
     fail(V.takeError());
   return std::move(*V);
 }
 
 /// The C name of an assembler symbol.
-std::string cName(StringRef Asm) {
+static std::string cName(StringRef Asm) {
   return Asm.starts_with("_") ? Asm.drop_front().str() : Asm.str();
 }
 
-bool isAssembly(StringRef Path) {
+static bool isAssembly(StringRef Path) {
   StringRef Ext = sys::path::extension(Path);
   return sys::fs::is_directory(Path) || Ext == ".asm" || Ext == ".s";
 }
 
 /// The *.asm files of a directory, sorted, by their real paths.
-Expected<std::vector<std::string>> asmFiles(StringRef Dir) {
+static Expected<std::vector<std::string>> asmFiles(StringRef Dir) {
   std::vector<std::string> Files;
   std::error_code EC;
   for (sys::fs::directory_iterator It(Dir, EC), End; It != End && !EC;
@@ -132,8 +140,9 @@ Expected<std::vector<std::string>> asmFiles(StringRef Dir) {
 
 /// The contracts named on the command line, or every one whose function is
 /// there to test.
-std::vector<Contract> selectContracts(function_ref<bool(StringRef)> Defined,
-                                      const std::vector<Contract> &All) {
+static std::vector<Contract>
+selectContracts(function_ref<bool(StringRef)> Defined,
+                const std::vector<Contract> &All) {
   std::vector<Contract> Picked;
   if (Names.empty()) {
     for (const Contract &K : All) {
@@ -156,8 +165,9 @@ std::vector<Contract> selectContracts(function_ref<bool(StringRef)> Defined,
 }
 
 /// The public functions among Globals that have no contract.
-std::vector<std::string> uncovered(const std::vector<std::string> &Globals,
-                                   const std::vector<Contract> &All) {
+static std::vector<std::string>
+uncovered(const std::vector<std::string> &Globals,
+          const std::vector<Contract> &All) {
   std::set<std::string> Covered;
   for (const Contract &K : All)
     Covered.insert(K.Name);
@@ -168,7 +178,14 @@ std::vector<std::string> uncovered(const std::vector<std::string> &Globals,
   return Out;
 }
 
-int runCheck() {
+static void status(bool Ok) {
+  if (Ok)
+    WithColor(outs(), raw_ostream::GREEN) << "ok  ";
+  else
+    WithColor(outs(), raw_ostream::RED, /*Bold=*/true) << "FAIL";
+}
+
+static int runCheck() {
   Cpu C = CpuFlag;
   // Contracts come from the sources under test and from --contracts. Sources
   // are linked once the functions to test are known.
@@ -223,6 +240,7 @@ int runCheck() {
 #ifdef Z80TESTER_ASSEMBLER
   if (Lib) {
     std::vector<std::string> Roots;
+    Roots.reserve(Contracts.size());
     for (const Contract &K : Contracts)
       Roots.push_back(K.Name);
     Img = check(Lib->link(Roots));
@@ -316,12 +334,6 @@ int runCheck() {
   size_t Width = 16;
   for (const TestPlan &P : Plans)
     Width = std::max(Width, P.Name.size());
-  auto Status = [](bool Ok) {
-    if (Ok)
-      WithColor(outs(), raw_ostream::GREEN) << "ok  ";
-    else
-      WithColor(outs(), raw_ostream::RED, /*Bold=*/true) << "FAIL";
-  };
   bool AllOk = true;
   for (size_t I = 0; I < Plans.size(); ++I) {
     const TestPlan &P = Plans[I];
@@ -336,7 +348,7 @@ int runCheck() {
                         : R.Exhaustive ? "(all)"
                                        : "(sampled)",
                         R.Checked);
-      Status(Ok);
+      status(Ok);
       outs() << formatv("  max {0} steps\n", R.MaxSteps);
       if (!Ok) {
         WithColor(outs(), raw_ostream::RED)
@@ -362,7 +374,7 @@ int runCheck() {
         prove(P, K, I, *Img, ProofBitcode->getMemBufferRef(), PO);
     if (!R) {
       AllOk = false;
-      Status(false);
+      status(false);
       outs() << '\n';
       WithColor(outs(), raw_ostream::RED)
           << "  " << toString(R.takeError()) << '\n';
@@ -371,7 +383,7 @@ int runCheck() {
     }
     bool Ok = R->S == ProofResult::Proved;
     AllOk &= Ok;
-    Status(Ok);
+    status(Ok);
     if (Ok) {
       outs() << formatv("  proved in {0:f1} s", R->Seconds);
       if (K.Unroll)
@@ -418,13 +430,215 @@ int runCheck() {
   return AllOk ? 0 : 1;
 }
 
-} // namespace
+#if defined(Z80TESTER_ASSEMBLER) && defined(Z80TESTER_ALIVE2)
+static std::string hex(uint64_t V, unsigned Bits) {
+  return (Bits == 8 ? formatv("0x{0:x-2}", V) : formatv("0x{0:x-4}", V)).str();
+}
+
+static std::string keptValue(Kept K, uint64_t V) {
+  std::string Value =
+      keptBits(K) == 1 ? std::to_string(V) : hex(V, keptBits(K));
+  return (keptName(K) + Twine('=') + Value).str();
+}
+
+/// An argument of a counterexample, by name.
+static std::optional<uint64_t> exampleValue(const ProofResult &R,
+                                            StringRef Name) {
+  for (const auto &[N, V] : R.Example)
+    if (N == Name)
+      return uint64_t(V);
+  return std::nullopt;
+}
+
+/// The registers and flags a counterexample starts from.
+static std::string startState(Cpu C, const ProofResult &R) {
+  auto Get = [&](StringRef Name) { return exampleValue(R, Name); };
+  std::vector<std::string> Out;
+  auto Show = [&](StringRef Name, std::optional<uint64_t> V, unsigned Bits) {
+    Out.push_back((Name + "=" + (V ? hex(*V, Bits) : "?")).str());
+  };
+  for (StringRef N : {"A", "B", "C", "D", "E", "H", "L"})
+    Show(N, Get(N), 8);
+  // F as the CPU lays it out.
+  std::optional<uint64_t> F = 0;
+  for (auto [Name, Z80Bit, SM83Bit] :
+       {std::tuple("SF", 7, -1), std::tuple("ZF", 6, 7), std::tuple("HF", 4, 5),
+        std::tuple("PVF", 2, -1), std::tuple("NF", 1, 6),
+        std::tuple("CF", 0, 4)}) {
+    int Bit = C == Cpu::SM83 ? SM83Bit : Z80Bit;
+    if (Bit < 0)
+      continue;
+    std::optional<uint64_t> V = Get(Name);
+    F = F && V ? std::optional(*F | *V << Bit) : std::nullopt;
+  }
+  Show("F", F, 8);
+  if (C == Cpu::Z80)
+    for (auto [Pair, Hi, Lo] :
+         {std::tuple("IX", "IXH", "IXL"), std::tuple("IY", "IYH", "IYL")}) {
+      std::optional<uint64_t> H = Get(Hi), L = Get(Lo);
+      Show(Pair, H && L ? std::optional(*H << 8 | *L) : std::nullopt, 16);
+    }
+  Show("SP", Get("SP"), 16);
+  return join(Out, " ");
+}
+
+/// The memory a counterexample starts with: the bytes it gives, and the value
+/// of the others.
+static std::string startMemory(const ProofResult &R) {
+  std::vector<std::string> Out;
+  std::set<uint64_t> Seen;
+  for (unsigned C = 0;; ++C) {
+    std::optional<uint64_t> Addr = exampleValue(R, "addr" + std::to_string(C));
+    std::optional<uint64_t> Byte = exampleValue(R, "byte" + std::to_string(C));
+    if (!Addr || !Byte)
+      break;
+    // The first cell for an address wins.
+    if (Seen.insert(*Addr).second)
+      Out.push_back("(" + hex(*Addr, 16) + ")=" + hex(*Byte, 8));
+  }
+  std::optional<uint64_t> Fill = exampleValue(R, "fill");
+  Out.push_back((Out.empty() ? "every byte " : "others ") +
+                (Fill ? hex(*Fill, 8) : "?"));
+  return join(Out, " ");
+}
+
+/// What one side of a rule returns, as Alive2 prints it: whether it got to
+/// its end, where it went if not, what the rule keeps and the byte at `at`.
+static std::optional<APInt> sideValue(StringRef Text, const Rule &R) {
+  unsigned Bits = 1 + 16 + 8;
+  for (Kept K : R.Keep)
+    Bits += keptBits(K);
+  if (!Text.consume_front("#x"))
+    return std::nullopt;
+  return APInt(Bits, Text.take_while(isHexDigit), 16);
+}
+
+/// Shows a side's value, with the byte at At if ShowByte.
+static std::string sideResult(const Rule &R, const APInt &V,
+                              std::optional<uint64_t> At, bool ShowByte) {
+  unsigned Bits = V.getBitWidth();
+  std::vector<std::string> Out;
+  unsigned Pos = Bits;
+  auto Take = [&](unsigned N) {
+    Pos -= N;
+    return V.extractBitsAsZExtValue(N, Pos);
+  };
+  bool Ended = Take(1);
+  uint64_t Exit = Take(16);
+  Out.reserve(R.Keep.size() + 2);
+  for (Kept K : R.Keep)
+    Out.push_back(keptValue(K, Take(keptBits(K))));
+  uint64_t Byte = Take(8);
+  if (At && ShowByte)
+    Out.push_back("(" + hex(*At, 16) + ")=" + hex(Byte, 8));
+  if (!Ended)
+    Out.push_back("leaves to " + hex(Exit, 16));
+  return join(Out, " ");
+}
+
+static int runRules() {
+  Cpu C = CpuFlag;
+  std::vector<Rule> All = check(loadRules(InputPath, C));
+  std::vector<Rule> Rules;
+  if (Names.empty())
+    Rules = All;
+  for (const std::string &Name : Names) {
+    auto It = llvm::find_if(All, [&](const Rule &R) { return R.Name == Name; });
+    if (It == All.end())
+      fail(createStringError("no rule %s", Name.c_str()));
+    Rules.push_back(*It);
+  }
+
+  // The assembler reads the rules from a file.
+  SmallString<128> Tmp;
+  int FD;
+  if (std::error_code EC =
+          sys::fs::createTemporaryFile("z80-test-rules", "s", FD, Tmp))
+    fail(createStringError(EC, "cannot create a temporary file: %s",
+                           EC.message().c_str()));
+  FileRemover Remove(Tmp);
+  {
+    raw_fd_ostream OS(FD, /*shouldClose=*/true);
+    OS << rulesSource(Rules);
+  }
+  Expected<AsmLibrary> Lib = AsmLibrary::assemble(C, {Tmp.str().str()});
+  if (!Lib) {
+    consumeError(Lib.takeError());
+    fail(createStringError("%s: does not assemble", InputPath.c_str()));
+  }
+  std::vector<std::string> Roots;
+  for (size_t I = 0; I < Rules.size(); ++I)
+    for (bool After : {false, true})
+      Roots.push_back(ruleLabel(I, After));
+  Image Img = check(Lib->link(Roots));
+
+  ProofOptions PO;
+  PO.Timeout = SmtTimeout;
+  PO.Memory = SmtMemory;
+
+  size_t Width = 16;
+  for (const Rule &R : Rules)
+    Width = std::max(Width, R.Name.size());
+  bool AllOk = true;
+  for (size_t I = 0; I < Rules.size(); ++I) {
+    const Rule &R = Rules[I];
+    outs() << left_justify(R.Name, Width) << "  ";
+    outs().flush();
+    Expected<ProofResult> P = proveRule(R, I, C, Img, PO);
+    if (!P) {
+      AllOk = false;
+      status(false);
+      outs() << '\n';
+      WithColor(outs(), raw_ostream::RED)
+          << "  " << toString(P.takeError()) << '\n';
+      outs().flush();
+      continue;
+    }
+    bool Ok = P->S == ProofResult::Proved;
+    AllOk &= Ok;
+    status(Ok);
+    if (Ok) {
+      outs() << formatv("  proved in {0:f1} s\n", P->Seconds);
+    } else if (P->S == ProofResult::Unproven) {
+      outs() << formatv("  not proved after {0:f1} s\n", P->Seconds);
+      WithColor(outs(), raw_ostream::YELLOW)
+          << "  Alive2: " << P->Verdict << '\n';
+    } else {
+      outs() << "  counterexample\n";
+      WithColor(outs(), raw_ostream::RED) << "  Alive2: " << P->Verdict << '\n';
+      outs() << "  from    " << startState(C, *P) << "\n          "
+             << startMemory(*P) << '\n';
+      std::optional<APInt> Before = sideValue(P->SourceValue, R);
+      std::optional<APInt> After = sideValue(P->TargetValue, R);
+      if (Before && After) {
+        std::optional<uint64_t> At = exampleValue(*P, "at");
+        bool ShowByte = Before->trunc(8) != After->trunc(8);
+        outs() << "  before  " << sideResult(R, *Before, At, ShowByte)
+               << "\n  after   " << sideResult(R, *After, At, ShowByte) << '\n';
+      }
+    }
+    outs().flush();
+  }
+  return AllOk ? 0 : 1;
+}
+#endif
 
 int main(int argc, char **argv) {
   InitLLVM X(argc, argv);
   // Only our options; those of the linked LLVM libraries still work.
   cl::HideUnrelatedOptions(Category);
   cl::ParseCommandLineOptions(
-      argc, argv, "Tests the llvm-z80 runtime against its contracts\n");
+      argc, argv,
+      "Tests the llvm-z80 runtime against its contracts, or proves rewrite "
+      "rules\n");
+  if (sys::path::extension(InputPath) == ".rules") {
+#if defined(Z80TESTER_ASSEMBLER) && defined(Z80TESTER_ALIVE2)
+    return runRules();
+#else
+    fail(createStringError("%s: proving rules needs a z80-test built with "
+                           "Z80LIFT_TESTER_ASSEMBLER and Alive2",
+                           InputPath.c_str()));
+#endif
+  }
   return runCheck();
 }

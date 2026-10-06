@@ -71,6 +71,13 @@ z80-test build/images/z80-runtime.elf \
     --contracts <llvm-z80>/compiler-rt/lib/builtins/z80 --contracts extra.contracts
 ```
 
+It also proves rewrite rules, such as a compiler's peepholes, written in a
+`.rules` file; see [tester/docs/Rules.md](tester/docs/Rules.md).
+
+```sh
+z80-test peepholes.rules
+```
+
 ## License
 
 Licensed under either Apache-2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or MIT
