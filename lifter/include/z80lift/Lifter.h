@@ -9,15 +9,25 @@
 
 #include <map>
 #include <memory>
+#include <string>
 #include <vector>
+
+namespace llvm {
+class IRBuilderBase;
+} // namespace llvm
 
 namespace z80lift {
 
 /// Lifts runtime functions into one module as `void @name(ptr %state,
 /// ptr %mem)`. A lifted function runs until control leaves it, then returns
-/// with PC holding the address execution continues at.
+/// with PC holding the address execution continues at. An argument read from
+/// the bytes of an undefined symbol is built from a call to
+/// `i32 @"z80lift.symbol.<name>"()`, which stands for the symbol's value.
 class Lifter {
 public:
+  /// The name of the function that stands for the value of Symbol.
+  static std::string symbolFunction(llvm::StringRef Symbol);
+
   static llvm::Expected<std::unique_ptr<Lifter>>
   create(z80core::Cpu C, const z80core::Image &Img, llvm::LLVMContext &Ctx);
 
@@ -48,6 +58,8 @@ private:
       : C(C), Img(Img), M(std::move(M)) {}
 
   llvm::Error buildBody(const CFG &F, llvm::Function *Fn);
+  llvm::Value *argValue(llvm::IRBuilderBase &B, const z80core::Inst &I,
+                        unsigned K);
 
   z80core::Cpu C;
   const z80core::Image &Img;

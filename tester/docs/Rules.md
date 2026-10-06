@@ -3,8 +3,9 @@
 z80-test proves rewrite rules, such as a compiler's peepholes, with
 [Alive2](https://github.com/AliveToolkit/alive2): the code after the rewrite
 must leave what the rule keeps, and memory, as the code before it does, for
-any registers, flags and memory. Given a `.rules` file, it proves every rule
-in it, or the rules named after it.
+any registers, flags and memory, and any values of the rule's constants.
+Given a `.rules` file, it proves every rule in it, or the rules named after
+it.
 
 ```sh
 z80-test peepholes.rules
@@ -39,6 +40,41 @@ rule zero-a
 
 All rules of a file are assembled together, so a label can be defined only
 once in the file.
+
+## Constants
+
+A rule can hold for every value of a constant instead of one. `const:`
+declares a constant, which the code names like a symbol, and the proof covers
+every value in its range:
+
+```
+// Two additions of constants folded into one load.
+rule fold-add
+    const: k
+    const: j
+    const: m
+    assume: k <= 0xff && j <= 0xff && m == ((k + j) & 0xff)
+    before:
+        ld      a, #k
+        add     a, #j
+    after:
+        ld      a, #m
+    keep: A
+```
+
+- `const: <name>` declares a constant from 0 to 0xffff, and
+  `const: <name> <min>..<max>` one with another range, such as `-128..127`
+  for an index offset.
+- `assume: <expression>` limits the constants: the rule only has to hold where
+  the expression is not 0. Expressions use C's operators and precedence on
+  integers, and dividing by 0 gives 0. A rule may have several `assume:`
+  lines.
+- An instruction reads the low bits of a constant, as a linker would write
+  them. An operand can add a number to a constant, as in `(k + 1)`, but not
+  another constant: give the sum a constant of its own and an `assume:` that
+  says what it equals.
+- A constant cannot be a jump target or part of an opcode, such as the bit
+  number of `bit`. Its name cannot be a register's or a label's.
 
 ## What must match
 
@@ -76,7 +112,8 @@ zero-a-flags      FAIL  counterexample
 ```
 
 `from` gives the registers and memory that the code starts with: the bytes it
-lists, and the value of all other bytes. `before` and `after` give what each
+lists, and the value of all other bytes. For a rule with constants, `const`
+gives their values. `before` and `after` give what each
 side leaves of what the rule keeps, and the byte of memory where they differ,
 if they do.
 

@@ -8,6 +8,8 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <array>
+#include <cstdint>
 #include <optional>
 #include <set>
 
@@ -20,6 +22,11 @@ namespace {
 const char *const KeptNames[] = {"A",  "B",  "C",  "D",   "E",  "H",  "L",
                                  "BC", "DE", "HL", "IX",  "IY", "SP", "F",
                                  "SF", "ZF", "HF", "PVF", "NF", "CF"};
+
+// Names the assembler takes for registers, not symbols.
+const char *const RegisterNames[] = {
+    "a",  "b",  "c",  "d",  "e",  "h",  "l",   "i",   "r",   "af",
+    "bc", "de", "hl", "sp", "ix", "iy", "ixh", "ixl", "iyh", "iyl"};
 
 } // namespace
 
@@ -42,6 +49,139 @@ unsigned z80tester::keptBits(Kept K) {
   if (K <= Kept::SP)
     return 16;
   return 1;
+}
+
+namespace {
+
+/// Reads an assumption: an integer expression with C's operators and
+/// precedence, over numbers and names.
+class ExprParser {
+public:
+  explicit ExprParser(StringRef Text) : Rest(Text) {}
+
+  Expected<std::shared_ptr<const Expr>> parse() {
+    auto E = binary(0);
+    if (!E)
+      return E;
+    if (!Rest.ltrim().empty())
+      return error("unexpected '" + Rest.ltrim().str() + "'");
+    return E;
+  }
+
+private:
+  StringRef Rest;
+
+  // From the loosest binding to the tightest.
+  static constexpr std::array<std::initializer_list<StringRef>, 10> Levels = {{
+      {"||"},
+      {"&&"},
+      {"|"},
+      {"^"},
+      {"&"},
+      {"==", "!="},
+      {"<=", ">=", "<", ">"},
+      {"<<", ">>"},
+      {"+", "-"},
+      {"*", "/", "%"},
+  }};
+
+  static Error error(const Twine &Msg) {
+    return createStringError("%s", Msg.str().c_str());
+  }
+
+  // The longest operator that starts Rest.
+  StringRef peekOp() {
+    Rest = Rest.ltrim();
+    for (StringRef Op :
+         {"||", "&&", "==", "!=", "<=", ">=", "<<", ">>", "|", "^", "&",
+          "<",  ">",  "+",  "-",  "*",  "/",  "%",  "!",  "~", "(", ")"})
+      if (Rest.starts_with(Op))
+        return Op;
+    return "";
+  }
+
+  Expected<std::shared_ptr<const Expr>> binary(unsigned Level) {
+    if (Level == Levels.size())
+      return unary();
+    auto First = binary(Level + 1);
+    if (!First)
+      return First;
+    std::shared_ptr<const Expr> L = *First;
+    for (;;) {
+      StringRef Op = peekOp();
+      if (!is_contained(Levels[Level], Op))
+        return L;
+      Rest = Rest.drop_front(Op.size());
+      auto R = binary(Level + 1);
+      if (!R)
+        return R;
+      auto E = std::make_shared<Expr>();
+      E->K = Expr::Binary;
+      E->Name = Op.str();
+      E->L = L;
+      E->R = *R;
+      L = E;
+    }
+  }
+
+  Expected<std::shared_ptr<const Expr>> unary() {
+    StringRef Op = peekOp();
+    if (Op == "-" || Op == "!" || Op == "~") {
+      Rest = Rest.drop_front();
+      auto V = unary();
+      if (!V)
+        return V;
+      auto E = std::make_shared<Expr>();
+      E->K = Expr::Unary;
+      E->Name = Op.str();
+      E->L = *V;
+      return E;
+    }
+    if (Op == "(") {
+      Rest = Rest.drop_front();
+      auto V = binary(0);
+      if (!V)
+        return V;
+      if (peekOp() != ")")
+        return error("expected ')'");
+      Rest = Rest.drop_front();
+      return V;
+    }
+    if (Rest.empty())
+      return error("expected a number or a constant");
+    auto E = std::make_shared<Expr>();
+    if (isDigit(Rest.front())) {
+      StringRef Num = Rest.take_while(isAlnum);
+      Rest = Rest.drop_front(Num.size());
+      if (Num.getAsInteger(0, E->Val))
+        return error("'" + Num + "' is not a number");
+      return E;
+    }
+    StringRef Name =
+        Rest.take_while([](char Ch) { return isAlnum(Ch) || Ch == '_'; });
+    if (Name.empty() || isDigit(Name.front()))
+      return error("unexpected '" + Rest.str() + "'");
+    Rest = Rest.drop_front(Name.size());
+    E->K = Expr::Const;
+    E->Name = Name.str();
+    return E;
+  }
+};
+
+} // namespace
+
+/// Checks that E names only constants of R.
+static Error checkNames(const Expr &E, const Rule &R) {
+  if (E.K == Expr::Const &&
+      none_of(R.Consts, [&](const RuleConst &C) { return C.Name == E.Name; }))
+    return createStringError("%s: rule %s assumes something of %s, which is "
+                             "not one of its constants",
+                             R.where().c_str(), R.Name.c_str(), E.Name.c_str());
+  for (const auto &Sub : {E.L, E.R})
+    if (Sub)
+      if (Error Err = checkNames(*Sub, R))
+        return Err;
+  return Error::success();
 }
 
 std::string Rule::where() const {
@@ -104,6 +244,50 @@ Expected<std::vector<Rule>> z80tester::loadRules(StringRef Path, Cpu C) {
       Side = nullptr;
       continue;
     }
+    if (Text.consume_front("const:")) {
+      SmallVector<StringRef> Words;
+      SplitString(Text, Words);
+      auto Bad = [&] {
+        return createStringError("%s: expected 'const: <name>' or 'const: "
+                                 "<name> <min>..<max>'",
+                                 Where.c_str());
+      };
+      auto NameChar = [](char Ch) { return isAlnum(Ch) || Ch == '_'; };
+      if (Words.empty() || Words.size() > 2 || isDigit(Words[0].front()) ||
+          !all_of(Words[0], NameChar))
+        return Bad();
+      RuleConst K;
+      K.Name = Words[0].str();
+      if (is_contained(RegisterNames, Words[0].lower()))
+        return createStringError("%s: %s is a register, not a name for a "
+                                 "constant",
+                                 Where.c_str(), K.Name.c_str());
+      if (Words.size() == 2) {
+        auto [Min, Max] = Words[1].split("..");
+        if (Min.getAsInteger(0, K.Min) || Max.getAsInteger(0, K.Max))
+          return Bad();
+        if (K.Min > K.Max || K.Min < INT32_MIN || K.Max > INT32_MAX)
+          return createStringError("%s: the range of %s is empty or wider "
+                                   "than 32 bits",
+                                   Where.c_str(), K.Name.c_str());
+      }
+      if (any_of(R.Consts,
+                 [&](const RuleConst &C) { return C.Name == K.Name; }))
+        return createStringError("%s: second constant named %s", Where.c_str(),
+                                 K.Name.c_str());
+      R.Consts.push_back(K);
+      Side = nullptr;
+      continue;
+    }
+    if (Text.consume_front("assume:")) {
+      auto E = ExprParser(Text).parse();
+      if (!E)
+        return createStringError("%s: %s", Where.c_str(),
+                                 toString(E.takeError()).c_str());
+      R.Assumes.push_back(*E);
+      Side = nullptr;
+      continue;
+    }
     if (Text.consume_front("memory:")) {
       SmallVector<StringRef> Words;
       SplitString(Text, Words);
@@ -144,6 +328,9 @@ Expected<std::vector<Rule>> z80tester::loadRules(StringRef Path, Cpu C) {
       return createStringError("%s: rule %s compares memory above SP, so it "
                                "must keep SP",
                                R.where().c_str(), R.Name.c_str());
+    for (const auto &E : R.Assumes)
+      if (Error Err = checkNames(*E, R))
+        return std::move(Err);
   }
   return Rules;
 }

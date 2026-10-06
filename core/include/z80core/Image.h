@@ -34,6 +34,18 @@ struct Image {
   /// Every symbol in an executable section by name.
   std::map<std::string, uint16_t, std::less<>> Addrs;
 
+  /// A byte that holds bits Shift to Shift + 7 of Symbol + Addend, for a
+  /// symbol the link left undefined.
+  struct SymbolByte {
+    std::string Symbol;
+    int64_t Addend = 0;
+    unsigned Shift = 0;
+  };
+
+  /// The bytes of Mem that hold part of an undefined symbol's value; Mem has
+  /// 0 there.
+  std::map<uint16_t, SymbolByte> SymbolBytes;
+
   static llvm::Expected<Image> load(llvm::StringRef Path);
 
   /// Records a symbol in an executable section.

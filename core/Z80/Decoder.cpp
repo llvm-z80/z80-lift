@@ -52,21 +52,33 @@ private:
     return Lo | fetch() << 8;
   }
 
+  Arg imm8() {
+    Field F{uint8_t(Pos - I.Addr), 1};
+    return {fetch(), F};
+  }
+
+  Arg imm16() {
+    Field F{uint8_t(Pos - I.Addr), 2};
+    return {fetch16(), F};
+  }
+
   uint16_t rel() {
     auto D = int8_t(fetch());
     return Pos + D;
   }
 
-  bool emit(Op O, unsigned A = 0, unsigned B = 0, unsigned C = 0) {
+  bool emit(Op O, Arg A = {}, Arg B = {}, Arg C = {}) {
     I.Op = O;
-    I.Args[0] = A;
-    I.Args[1] = B;
-    I.Args[2] = C;
+    const Arg *Xs[] = {&A, &B, &C};
+    for (unsigned K = 0; K < 3; ++K) {
+      I.Args[K] = Xs[K]->V;
+      I.Fields[K] = Xs[K]->F;
+    }
     I.K = instKind(Cpu::Z80, O);
     return true;
   }
 
-  bool emitTo(Op O, uint16_t Dest, unsigned A = 0, unsigned B = 0) {
+  bool emitTo(Op O, uint16_t Dest, Arg A = {}, Arg B = {}) {
     I.Dest = Dest;
     return emit(O, A, B);
   }
@@ -101,7 +113,7 @@ private:
     return T[P2] == HL ? hlReg(P) : T[P2];
   }
 
-  unsigned disp(unsigned R) { return isIndexed(R) ? fetch() : 0; }
+  Arg disp(unsigned R) { return isIndexed(R) ? imm8() : Arg(); }
 
   bool base(uint8_t Opc, Prefix P) {
     unsigned X = Opc >> 6, Y = Opc >> 3 & 7, Z = Opc & 7;
@@ -113,12 +125,12 @@ private:
       }
       bool Mem = Y == 6 || Z == 6;
       unsigned Dst = reg8(Y, P, Mem), Src = reg8(Z, P, Mem);
-      unsigned D = isIndexed(Dst) || isIndexed(Src) ? fetch() : 0;
+      Arg D = isIndexed(Dst) || isIndexed(Src) ? imm8() : Arg();
       return emit(LD_R8_R8, Dst, Src, D);
     }
     case 2: {
-      unsigned Src = reg8(Z, P, false), D = disp(Src);
-      return emit(ALU_R8, Y, Src, D);
+      unsigned Src = reg8(Z, P, false);
+      return emit(ALU_R8, Y, Src, disp(Src));
     }
     default: return block3(Y, Z, P);
     }
@@ -147,8 +159,7 @@ private:
     case 1:
       if (!Q) {
         unsigned R = rp(P2, P);
-        uint16_t NN = fetch16();
-        return emit(LD_R16_NN, R, NN);
+        return emit(LD_R16_NN, R, imm16());
       } else {
         unsigned Dst = hlReg(P), Src = rp(P2, P);
         return emit(ADD_R16, Dst, Src);
@@ -165,14 +176,14 @@ private:
       }
       case 2: {
         unsigned R = hlReg(P);
-        uint16_t NN = fetch16();
+        Arg NN = imm16();
         if (Q) {
           return emit(LD_R16_MNN, R, NN);
         }
         return emit(LD_MNN_R16, R, NN);
       }
       default: {
-        uint16_t NN = fetch16();
+        Arg NN = imm16();
         if (Q) {
           return emit(LD_A_MNN, NN);
         }
@@ -185,11 +196,12 @@ private:
     }
     case 4:
     case 5: {
-      unsigned R = reg8(Y, P, false), D = disp(R);
-      return emit(Z == 4 ? INC_R8 : DEC_R8, R, D);
+      unsigned R = reg8(Y, P, false);
+      return emit(Z == 4 ? INC_R8 : DEC_R8, R, disp(R));
     }
     case 6: {
-      unsigned R = reg8(Y, P, false), D = disp(R), N = fetch();
+      unsigned R = reg8(Y, P, false);
+      Arg D = disp(R), N = imm8();
       return emit(LD_R8_N, R, N, D);
     }
     default: {
@@ -255,10 +267,7 @@ private:
         return emitTo(CALL, NN, NN);
       }
       return false; // a second DD, ED or FD prefix
-    case 6: {
-      unsigned N = fetch();
-      return emit(ALU_N, Y, N);
-    }
+    case 6: return emit(ALU_N, Y, imm8());
     default: {
       uint16_t T = Y * 8;
       return emitTo(RST, T, T);
@@ -266,7 +275,7 @@ private:
     }
   }
 
-  bool bitOp(uint8_t Opc, unsigned R, unsigned D) {
+  bool bitOp(uint8_t Opc, unsigned R, Arg D) {
     unsigned X = Opc >> 6, Y = Opc >> 3 & 7;
     switch (X) {
     case 0: return emit(ROT, Y, R, D);
@@ -284,7 +293,7 @@ private:
   // DD CB d op. Forms other than BIT that also copy the result to a register
   // are undocumented and rejected.
   bool indexedCB(Prefix P) {
-    unsigned D = fetch();
+    Arg D = imm8();
     uint8_t Opc = fetch();
     if (Opc >> 6 != 1 && (Opc & 7) != 6)
       return false;
@@ -305,7 +314,7 @@ private:
       }
       case 3: {
         unsigned R = rp(P2, NoPrefix);
-        uint16_t NN = fetch16();
+        Arg NN = imm16();
         if (Q) {
           return emit(LD_R16_MNN, R, NN);
         }

@@ -61,6 +61,45 @@ Expected<std::unique_ptr<Lifter>> Lifter::create(Cpu C, const Image &Img,
   return L;
 }
 
+std::string Lifter::symbolFunction(StringRef Symbol) {
+  return ("z80lift.symbol." + Symbol).str();
+}
+
+/// Argument K of I as the semantics take it: the decoded value, or else the
+/// value of the bytes it was read from, some of which hold part of an
+/// undefined symbol.
+Value *Lifter::argValue(IRBuilderBase &B, const Inst &I, unsigned K) {
+  const Field &F = I.Fields[K];
+  auto Byte = [&](unsigned N) { return uint16_t(I.Addr + F.Off + N); };
+  bool Known = true;
+  for (unsigned N = 0; N < F.Size; ++N)
+    Known &= !Img.SymbolBytes.count(Byte(N));
+  if (Known)
+    return B.getInt32(I.Args[K]);
+
+  Type *I32 = B.getInt32Ty();
+  Value *V = B.getInt32(0);
+  for (unsigned N = 0; N < F.Size; ++N) {
+    Value *Part;
+    if (auto It = Img.SymbolBytes.find(Byte(N)); It != Img.SymbolBytes.end()) {
+      const Image::SymbolByte &S = It->second;
+      FunctionCallee Fn = M->getOrInsertFunction(symbolFunction(S.Symbol), I32);
+      if (auto *Decl = dyn_cast<llvm::Function>(Fn.getCallee())) {
+        Decl->setDoesNotAccessMemory();
+        Decl->setDoesNotThrow();
+        Decl->setWillReturn();
+      }
+      Value *Sym =
+          B.CreateAdd(B.CreateCall(Fn), B.getInt32(uint32_t(S.Addend)));
+      Part = B.CreateAnd(B.CreateLShr(Sym, S.Shift), 0xFF);
+    } else {
+      Part = B.getInt32(Img.Mem[Byte(N)]);
+    }
+    V = B.CreateOr(V, B.CreateShl(Part, 8 * uint64_t(N)));
+  }
+  return V;
+}
+
 Expected<llvm::Function *> Lifter::lift(uint16_t Entry) {
   if (auto It = Lifted.find(Entry); It != Lifted.end())
     return It->second;
@@ -140,8 +179,8 @@ Error Lifter::buildBody(const CFG &F, llvm::Function *Fn) {
       B.CreateCall(SetPC, {S, B.getInt32(I.next())});
       if (&I == &Last && I.K == Kind::CondRet && TakenReturnsLeave)
         SPBefore = B.CreateCall(GetSP, {S});
-      B.CreateCall(Sem[I.Op], {S, Mem, B.getInt32(I.Args[0]),
-                               B.getInt32(I.Args[1]), B.getInt32(I.Args[2])});
+      B.CreateCall(Sem[I.Op], {S, Mem, argValue(B, I, 0), argValue(B, I, 1),
+                               argValue(B, I, 2)});
     }
 
     uint16_t Next = Last.next();

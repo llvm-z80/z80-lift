@@ -25,11 +25,19 @@ enum class Kind {
   Halt,
 };
 
+/// Where an argument was read from: Size bytes, little-endian, at offset Off
+/// in the instruction. Size 0 means the opcode gave it.
+struct Field {
+  uint8_t Off = 0;
+  uint8_t Size = 0;
+};
+
 struct Inst {
   uint16_t Addr = 0;
   uint8_t Len = 0;
   unsigned Op = 0;
   unsigned Args[3] = {0, 0, 0};
+  Field Fields[3];
   Kind K = Kind::Seq;
   uint16_t Dest = 0; // target of a direct jump or call
 

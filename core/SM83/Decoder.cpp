@@ -37,20 +37,32 @@ private:
     return Lo | fetch() << 8;
   }
 
+  Arg imm8() {
+    Field F{uint8_t(Pos - I.Addr), 1};
+    return {fetch(), F};
+  }
+
+  Arg imm16() {
+    Field F{uint8_t(Pos - I.Addr), 2};
+    return {fetch16(), F};
+  }
+
   uint16_t rel() {
     auto D = int8_t(fetch());
     return Pos + D;
   }
 
-  bool emit(Op O, unsigned A = 0, unsigned B = 0) {
+  bool emit(Op O, Arg A = {}, Arg B = {}) {
     I.Op = O;
-    I.Args[0] = A;
-    I.Args[1] = B;
+    I.Args[0] = A.V;
+    I.Args[1] = B.V;
+    I.Fields[0] = A.F;
+    I.Fields[1] = B.F;
     I.K = instKind(Cpu::SM83, O);
     return true;
   }
 
-  bool emitTo(Op O, uint16_t Dest, unsigned A = 0, unsigned B = 0) {
+  bool emitTo(Op O, uint16_t Dest, Arg A = {}, Arg B = {}) {
     I.Dest = Dest;
     return emit(O, A, B);
   }
@@ -82,10 +94,7 @@ private:
     case 0:
       switch (Y) {
       case 0: return emit(NOP);
-      case 1: {
-        uint16_t NN = fetch16();
-        return emit(LD_MNN_SP, NN);
-      }
+      case 1: return emit(LD_MNN_SP, imm16());
       case 2:
         fetch(); // STOP is followed by a padding byte
         return emit(STOP);
@@ -100,8 +109,7 @@ private:
       }
     case 1:
       if (!Q) {
-        uint16_t NN = fetch16();
-        return emit(LD_R16_NN, rp(P2), NN);
+        return emit(LD_R16_NN, rp(P2), imm16());
       }
       return emit(ADD_HL_R16, rp(P2));
     case 2: {
@@ -118,10 +126,7 @@ private:
     case 3: return emit(Q ? DEC_R16 : INC_R16, rp(P2));
     case 4:
     case 5: return emit(Z == 4 ? INC_R8 : DEC_R8, Y);
-    case 6: {
-      unsigned N = fetch();
-      return emit(LD_R8_N, Y, N);
-    }
+    case 6: return emit(LD_R8_N, Y, imm8());
     default: {
       const Op Ops[] = {RLCA, RRCA, RLA, RRA, DAA, CPL, SCF, CCF};
       return emit(Ops[Y]);
@@ -134,22 +139,10 @@ private:
     switch (Z) {
     case 0:
       switch (Y) {
-      case 4: {
-        unsigned N = fetch();
-        return emit(LDH_MN_A, N);
-      }
-      case 5: {
-        unsigned E = fetch();
-        return emit(ADD_SP_E, E);
-      }
-      case 6: {
-        unsigned N = fetch();
-        return emit(LDH_A_MN, N);
-      }
-      case 7: {
-        unsigned E = fetch();
-        return emit(LD_HL_SPE, E);
-      }
+      case 4: return emit(LDH_MN_A, imm8());
+      case 5: return emit(ADD_SP_E, imm8());
+      case 6: return emit(LDH_A_MN, imm8());
+      case 7: return emit(LD_HL_SPE, imm8());
       default: return emit(RET_CC, Y);
       }
     case 1:
@@ -165,15 +158,9 @@ private:
     case 2:
       switch (Y) {
       case 4: return emit(LDH_MC_A);
-      case 5: {
-        uint16_t NN = fetch16();
-        return emit(LD_MNN_A, NN);
-      }
+      case 5: return emit(LD_MNN_A, imm16());
       case 6: return emit(LDH_A_MC);
-      case 7: {
-        uint16_t NN = fetch16();
-        return emit(LD_A_MNN, NN);
-      }
+      case 7: return emit(LD_A_MNN, imm16());
       default: {
         uint16_t NN = fetch16();
         return emitTo(JP_CC, NN, Y, NN);
@@ -204,10 +191,7 @@ private:
         return emitTo(CALL, NN, NN);
       }
       return false;
-    case 6: {
-      unsigned N = fetch();
-      return emit(ALU_N, Y, N);
-    }
+    case 6: return emit(ALU_N, Y, imm8());
     default: {
       uint16_t T = Y * 8;
       return emitTo(RST, T, T);

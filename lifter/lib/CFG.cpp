@@ -2,9 +2,27 @@
 
 #include "z80lift/CFG.h"
 
+#include "llvm/ADT/STLExtras.h"
+
 using namespace llvm;
 using namespace z80core;
 using namespace z80lift;
+
+/// The undefined symbol in a byte of I that is not an argument read as data,
+/// such as its opcode or a jump target, which must be known to lift it.
+static const Image::SymbolByte *misplacedSymbol(const Image &Img,
+                                                const Inst &I) {
+  for (unsigned K = 0; K < I.Len; ++K) {
+    auto It = Img.SymbolBytes.find(uint16_t(I.Addr + K));
+    if (It == Img.SymbolBytes.end())
+      continue;
+    if (none_of(I.Fields, [&](const Field &F) {
+          return K >= F.Off && K < F.Off + F.Size;
+        }))
+      return &It->second;
+  }
+  return nullptr;
+}
 
 Expected<CFG> z80lift::recoverCFG(Cpu C, const Image &Img, uint16_t Entry,
                                   bool OutsideLeaves) {
@@ -39,6 +57,11 @@ Expected<CFG> z80lift::recoverCFG(Cpu C, const Image &Img, uint16_t Entry,
       if (!decode(C, Img.Mem.data(), A, I))
         return createStringError("%s: cannot decode 0x%04x",
                                  Img.nameAt(Entry).c_str(), A);
+      if (const Image::SymbolByte *S = misplacedSymbol(Img, I))
+        return createStringError("%s: the instruction at 0x%04x needs the "
+                                 "value of %s",
+                                 Img.nameAt(Entry).c_str(), A,
+                                 S->Symbol.c_str());
       Insts[A] = I;
       bool FallsThrough = true;
       switch (I.K) {

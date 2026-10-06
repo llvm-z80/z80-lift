@@ -3,6 +3,8 @@
 
 #include "z80tester/Assembler.h"
 
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/MC/MCAsmBackend.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCCodeEmitter.h"
@@ -112,6 +114,35 @@ static bool relocate(uint8_t *Loc, uint32_t Type, int64_t V) {
       Loc[I] = uint64_t(V) >> (8 * I);
     return true;
   default: return false;
+  }
+}
+
+using ValueBytes = SmallVector<std::pair<unsigned, unsigned>, 4>;
+
+/// The bytes a relocation writes, as an offset and the bit of the value each
+/// starts at, for one against a symbol whose value is unknown. Nothing for a
+/// PC-relative one, which also depends on where it is.
+static std::optional<ValueBytes> valueBytes(uint32_t Type) {
+  switch (Type) {
+  case ELF::R_Z80_NONE: return ValueBytes();
+  case ELF::R_Z80_IMM8:
+  case ELF::R_Z80_ADDR8:
+  case ELF::R_Z80_DISP8:
+  case ELF::R_SM83_LDH8:
+  case ELF::R_Z80_ADDR16_LO:
+  case ELF::R_Z80_ADDR24_SEGMENT_LO: return ValueBytes{{0, 0}};
+  case ELF::R_Z80_ADDR16_HI:
+  case ELF::R_Z80_ADDR24_SEGMENT_HI: return ValueBytes{{0, 8}};
+  case ELF::R_Z80_ADDR24_BANK: return ValueBytes{{0, 16}};
+  case ELF::R_Z80_ADDR16:
+  case ELF::R_Z80_IMM16:
+  case ELF::R_Z80_ADDR24_SEGMENT:
+  case ELF::R_Z80_ADDR_ASCIZ:
+  case ELF::R_Z80_ADDR13: return ValueBytes{{0, 0}, {1, 8}};
+  case ELF::R_Z80_ADDR24: return ValueBytes{{0, 0}, {1, 8}, {2, 16}};
+  case ELF::R_Z80_FK_DATA_4:
+    return ValueBytes{{0, 0}, {1, 8}, {2, 16}, {3, 24}};
+  default: return std::nullopt;
   }
 }
 
@@ -236,7 +267,9 @@ bool AsmLibrary::linkable(StringRef File) const {
 }
 
 /// The objects Work needs, picked the way an archive's members are pulled in.
-Expected<std::set<size_t>> AsmLibrary::pick(std::vector<size_t> Work) const {
+Expected<std::set<size_t>>
+AsmLibrary::pick(std::vector<size_t> Work,
+                 ArrayRef<std::string> Undefined) const {
   std::set<size_t> Picked(Work.begin(), Work.end());
   while (!Work.empty()) {
     size_t I = Work.back();
@@ -250,7 +283,8 @@ Expected<std::set<size_t>> AsmLibrary::pick(std::vector<size_t> Work) const {
       if (std::optional<size_t> D = definer(S->Name)) {
         if (Picked.insert(*D).second)
           Work.push_back(*D);
-      } else if (!(S->Flags & object::SymbolRef::SF_Weak)) {
+      } else if (!(S->Flags & object::SymbolRef::SF_Weak) &&
+                 !is_contained(Undefined, S->Name)) {
         return createStringError(
             "%s needs %s, which no file defines",
             sys::path::filename(Objects[I]->File).str().c_str(),
@@ -261,7 +295,8 @@ Expected<std::set<size_t>> AsmLibrary::pick(std::vector<size_t> Work) const {
   return Picked;
 }
 
-Expected<Image> AsmLibrary::link(ArrayRef<std::string> Roots) const {
+Expected<Image> AsmLibrary::link(ArrayRef<std::string> Roots,
+                                 ArrayRef<std::string> Undefined) const {
   std::vector<size_t> Work;
   for (const std::string &R : Roots) {
     std::optional<size_t> I = definer(R);
@@ -271,7 +306,7 @@ Expected<Image> AsmLibrary::link(ArrayRef<std::string> Roots) const {
       return createStringError("no file defines %s", R.c_str());
     Work.push_back(*I);
   }
-  Expected<std::set<size_t>> PickedOr = pick(std::move(Work));
+  Expected<std::set<size_t>> PickedOr = pick(std::move(Work), Undefined);
   if (!PickedOr)
     return PickedOr.takeError();
   const std::set<size_t> &Picked = *PickedOr;
@@ -324,6 +359,12 @@ Expected<Image> AsmLibrary::link(ArrayRef<std::string> Roots) const {
         return S.takeError();
       if (S->Name.empty() || (S->Flags & object::SymbolRef::SF_Undefined))
         continue;
+      // The assembler resolves a reference to a symbol its file defines.
+      if (is_contained(Undefined, S->Name))
+        return createStringError(
+            "%s: %s must stay undefined, but is defined",
+            sys::path::filename(Objects[I]->File).str().c_str(),
+            S->Name.c_str());
       std::optional<uint32_t> A = Place(I, *S);
       if (!A)
         continue;
@@ -361,12 +402,15 @@ Expected<Image> AsmLibrary::link(ArrayRef<std::string> Roots) const {
       for (const object::RelocationRef &Rel : Sec.relocations()) {
         uint32_t P = B->second + Rel.getOffset();
         int64_t V = 0;
+        std::string Unknown; // a symbol in Undefined
         if (object::symbol_iterator It = Rel.getSymbol();
             It != Obj.symbol_end()) {
           Expected<Symbol> S = readSymbol(*It);
           if (!S)
             return S.takeError();
-          if (S->Flags & object::SymbolRef::SF_Undefined) {
+          if (is_contained(Undefined, S->Name)) {
+            Unknown = S->Name;
+          } else if (S->Flags & object::SymbolRef::SF_Undefined) {
             auto G = Globals.find(S->Name);
             V = G == Globals.end() ? 0 : G->second.first;
           } else if (std::optional<uint32_t> A = Place(I, *S)) {
@@ -380,8 +424,24 @@ Expected<Image> AsmLibrary::link(ArrayRef<std::string> Roots) const {
         Expected<int64_t> Addend = object::ELFRelocationRef(Rel).getAddend();
         if (!Addend)
           return Addend.takeError();
-        V += *Addend;
         uint32_t Type = Rel.getType();
+        if (!Unknown.empty()) {
+          auto Bytes = valueBytes(Type);
+          if (!Bytes)
+            return createStringError("%s: relocation of type %u at 0x%04x "
+                                     "needs the value of %s",
+                                     File.str().c_str(), Type, P,
+                                     Unknown.c_str());
+          for (auto [Off, Shift] : *Bytes) {
+            if (P + Off >= Img.Mem.size())
+              return createStringError("%s: relocation at the end of memory",
+                                       File.str().c_str());
+            Img.Mem[P + Off] = 0;
+            Img.SymbolBytes[uint16_t(P + Off)] = {Unknown, *Addend, Shift};
+          }
+          continue;
+        }
+        V += *Addend;
         if (Type == ELF::R_Z80_PCREL_8 || Type == ELF::R_Z80_PCREL_16)
           V -= P;
         if (P + 8 > Img.Mem.size())

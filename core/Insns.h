@@ -23,6 +23,14 @@ enum Op : unsigned {
 };
 } // namespace sm83
 
+/// A decoded argument and the bytes it was read from, if any.
+struct Arg {
+  unsigned V = 0;
+  Field F;
+  Arg(unsigned V = 0) : V(V) {}
+  Arg(unsigned V, Field F) : V(V), F(F) {}
+};
+
 bool decodeZ80(const uint8_t *Mem, uint16_t Addr, Inst &I);
 bool decodeSM83(const uint8_t *Mem, uint16_t Addr, Inst &I);
 

@@ -502,6 +502,21 @@ static std::string startMemory(const ProofResult &R) {
   return join(Out, " ");
 }
 
+/// The values of a rule's constants in a counterexample.
+static std::string constValues(const Rule &R, const ProofResult &P) {
+  std::vector<std::string> Out;
+  for (const RuleConst &K : R.Consts) {
+    std::optional<uint64_t> V = exampleValue(P, "const." + K.Name);
+    std::string Text = "?";
+    if (V && K.Min < 0)
+      Text = std::to_string(int32_t(*V));
+    else if (V)
+      Text = hex(*V, 16);
+    Out.push_back(K.Name + "=" + Text);
+  }
+  return join(Out, " ");
+}
+
 /// What one side of a rule returns, as Alive2 prints it: whether it got to
 /// its end, where it went if not, what the rule keeps and the byte at `at`.
 static std::optional<APInt> sideValue(StringRef Text, const Rule &R) {
@@ -566,11 +581,23 @@ static int runRules() {
     consumeError(Lib.takeError());
     fail(createStringError("%s: does not assemble", InputPath.c_str()));
   }
-  std::vector<std::string> Roots;
-  for (size_t I = 0; I < Rules.size(); ++I)
+  std::vector<std::string> Roots, Consts;
+  for (size_t I = 0; I < Rules.size(); ++I) {
     for (bool After : {false, true})
       Roots.push_back(ruleLabel(I, After));
-  Image Img = check(Lib->link(Roots));
+    for (const RuleConst &K : Rules[I].Consts)
+      Consts.push_back(K.Name);
+  }
+  Expected<Image> Linked = Lib->link(Roots, Consts);
+  if (!Linked) {
+    // The object is named after the temporary file.
+    std::string Msg = toString(Linked.takeError());
+    StringRef TmpName = sys::path::filename(Tmp);
+    for (size_t At; (At = Msg.find(TmpName)) != std::string::npos;)
+      Msg.replace(At, TmpName.size(), sys::path::filename(InputPath));
+    fail(createStringError("%s", Msg.c_str()));
+  }
+  Image Img = std::move(*Linked);
 
   ProofOptions PO;
   PO.Timeout = SmtTimeout;
@@ -608,6 +635,8 @@ static int runRules() {
       WithColor(outs(), raw_ostream::RED) << "  Alive2: " << P->Verdict << '\n';
       outs() << "  from    " << startState(C, *P) << "\n          "
              << startMemory(*P) << '\n';
+      if (!R.Consts.empty())
+        outs() << "  const   " << constValues(R, *P) << '\n';
       std::optional<APInt> Before = sideValue(P->SourceValue, R);
       std::optional<APInt> After = sideValue(P->TargetValue, R);
       if (Before && After) {

@@ -556,6 +556,105 @@ static Error rewriteMemory(Function &F, GlobalVariable *Mem,
   return Error::success();
 }
 
+/// The name of the parameter that holds rule constant Name.
+static std::string constParam(StringRef Name) {
+  return ("const." + Name).str();
+}
+
+/// The value of E, with the constants in Consts.
+static Value *exprValue(IRBuilder<> &B, const Expr &E,
+                        const StringMap<Value *> &Consts) {
+  Type *I64 = B.getInt64Ty();
+  Value *Zero = B.getInt64(0);
+  auto Bool = [&](Value *V) { return B.CreateZExt(V, I64); };
+  switch (E.K) {
+  case Expr::Num: return B.getInt64(E.Val);
+  case Expr::Const: return B.CreateSExt(Consts.lookup(E.Name), I64);
+  case Expr::Unary: {
+    Value *V = exprValue(B, *E.L, Consts);
+    if (E.Name == "-")
+      return B.CreateNeg(V);
+    if (E.Name == "~")
+      return B.CreateNot(V);
+    return Bool(B.CreateICmpEQ(V, Zero));
+  }
+  case Expr::Binary: break;
+  }
+  Value *L = exprValue(B, *E.L, Consts), *R = exprValue(B, *E.R, Consts);
+  StringRef Op = E.Name;
+  if (Op == "/" || Op == "%") {
+    // Dividing by 0 gives 0 rather than undefined behaviour.
+    Value *ByZero = B.CreateICmpEQ(R, Zero);
+    Value *D = B.CreateSelect(ByZero, B.getInt64(1), R);
+    Value *Q = Op == "/" ? B.CreateSDiv(L, D) : B.CreateSRem(L, D);
+    return B.CreateSelect(ByZero, Zero, Q);
+  }
+  if (Op == "<<" || Op == ">>") {
+    // A shift by 64 or more shifts every bit out.
+    Value *Far = B.CreateICmpUGE(R, B.getInt64(64));
+    Value *N = B.CreateSelect(Far, B.getInt64(63), R);
+    if (Op == ">>")
+      return B.CreateAShr(L, N);
+    return B.CreateSelect(Far, Zero, B.CreateShl(L, N));
+  }
+  if (Op == "&&" || Op == "||") {
+    Value *A = B.CreateICmpNE(L, Zero), *C = B.CreateICmpNE(R, Zero);
+    return Bool(Op == "&&" ? B.CreateAnd(A, C) : B.CreateOr(A, C));
+  }
+  static const std::pair<StringRef, CmpInst::Predicate> Cmps[] = {
+      {"==", CmpInst::ICMP_EQ}, {"!=", CmpInst::ICMP_NE},
+      {"<", CmpInst::ICMP_SLT}, {"<=", CmpInst::ICMP_SLE},
+      {">", CmpInst::ICMP_SGT}, {">=", CmpInst::ICMP_SGE}};
+  for (auto [Name, Pred] : Cmps)
+    if (Op == Name)
+      return Bool(B.CreateICmp(Pred, L, R));
+  static const std::pair<StringRef, Instruction::BinaryOps> Ops[] = {
+      {"+", Instruction::Add}, {"-", Instruction::Sub},
+      {"*", Instruction::Mul}, {"&", Instruction::And},
+      {"|", Instruction::Or},  {"^", Instruction::Xor}};
+  for (auto [Name, Opc] : Ops)
+    if (Op == Name)
+      return B.CreateBinOp(Opc, L, R);
+  llvm_unreachable("an operator the parser does not make");
+}
+
+/// Replaces the calls that stand for the values of R's constants with F's
+/// parameters for them. In Src, also assumes what R says of them.
+static Error bindConstants(const Rule &R, Function &F, bool Src) {
+  StringMap<Value *> Consts;
+  for (Argument &A : F.args())
+    if (StringRef N = A.getName(); N.consume_front(constParam("")))
+      Consts[N] = &A;
+  for (Instruction &I : make_early_inc_range(instructions(F))) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    Function *Callee = CI ? CI->getCalledFunction() : nullptr;
+    if (!Callee)
+      continue;
+    StringRef Sym = Callee->getName();
+    if (!Sym.consume_front(z80lift::Lifter::symbolFunction("")))
+      continue;
+    Value *V = Consts.lookup(Sym);
+    if (!V)
+      return createStringError("%s: the code of rule %s uses %s, which is not "
+                               "one of its constants",
+                               R.where().c_str(), R.Name.c_str(),
+                               Sym.str().c_str());
+    CI->replaceAllUsesWith(V);
+    CI->eraseFromParent();
+  }
+  if (!Src)
+    return Error::success();
+  IRBuilder<> B(&*F.getEntryBlock().getFirstInsertionPt());
+  for (const RuleConst &K : R.Consts) {
+    Value *V = B.CreateSExt(Consts.lookup(K.Name), B.getInt64Ty());
+    B.CreateAssumption(B.CreateAnd(B.CreateICmpSGE(V, B.getInt64(K.Min)),
+                                   B.CreateICmpSLE(V, B.getInt64(K.Max))));
+  }
+  for (const auto &E : R.Assumes)
+    B.CreateAssumption(B.CreateICmpNE(exprValue(B, *E, Consts), B.getInt64(0)));
+  return Error::success();
+}
+
 /// Inlines everything into @src and @tgt and turns their memory into values.
 /// Nothing may simplify the control flow: that would drop the checks that
 /// end in `unreachable`.
@@ -664,17 +763,25 @@ static Expected<Sides> buildSides(const Module &Lifted, const Rule &R, Cpu C,
     Params.push_back(Type::getInt16Ty(Ctx));
     Params.push_back(Type::getInt8Ty(Ctx));
   }
+  unsigned FirstConst = Params.size();
+  Params.insert(Params.end(), R.Consts.size(), Type::getInt32Ty(Ctx));
   unsigned Bits = 1 + 16 + 8;
   for (Kept K : R.Keep)
     Bits += keptBits(K);
   FunctionType *FT =
       FunctionType::get(Type::getIntNTy(Ctx, Bits), Params, false);
-  for (bool After : {false, true})
+  for (bool After : {false, true}) {
     S.F[After] = buildSide(*S.M, C, R, After ? "tgt" : "src", FT,
                            S.M->getFunction(Img.nameAt(Entry[After])),
                            Entry[After], S.Mem, Cells);
+    for (size_t K = 0; K < R.Consts.size(); ++K)
+      S.F[After]->getArg(FirstConst + K)->setName(constParam(R.Consts[K].Name));
+  }
   if (Error E = simplify(*S.M, S.F[0], S.F[1]))
     return std::move(E);
+  for (bool After : {false, true})
+    if (Error E = bindConstants(R, *S.F[After], !After))
+      return std::move(E);
   return S;
 }
 

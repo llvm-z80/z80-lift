@@ -40,14 +40,20 @@ public:
   bool linkable(llvm::StringRef File) const;
 
   /// Links the objects that define Roots, and those they need, from address 0.
-  llvm::Expected<z80core::Image> link(llvm::ArrayRef<std::string> Roots) const;
+  /// The symbols in Undefined may stay undefined; the bytes that hold their
+  /// values go to Image::SymbolBytes.
+  llvm::Expected<z80core::Image>
+  link(llvm::ArrayRef<std::string> Roots,
+       llvm::ArrayRef<std::string> Undefined = {}) const;
 
 private:
   struct Object;
 
   AsmLibrary();
   std::optional<size_t> definer(llvm::StringRef Name) const;
-  llvm::Expected<std::set<size_t>> pick(std::vector<size_t> Work) const;
+  llvm::Expected<std::set<size_t>>
+  pick(std::vector<size_t> Work,
+       llvm::ArrayRef<std::string> Undefined = {}) const;
 
   std::vector<std::unique_ptr<Object>> Objects;
   std::map<std::string, size_t, std::less<>> Defs; // the first file wins

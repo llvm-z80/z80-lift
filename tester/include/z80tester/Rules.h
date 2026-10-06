@@ -10,6 +10,8 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 
+#include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -43,6 +45,22 @@ enum class Kept {
 const char *keptName(Kept K);
 unsigned keptBits(Kept K);
 
+/// A constant of a rule, which its code names as a symbol: any integer from
+/// Min to Max, of which the instructions read the low bits.
+struct RuleConst {
+  std::string Name;
+  int64_t Min = 0, Max = 0xFFFF;
+};
+
+/// An integer expression over a rule's constants, with C's operators.
+struct Expr {
+  enum Kind { Num, Const, Unary, Binary };
+  Kind K = Num;
+  int64_t Val = 0;
+  std::string Name; // the constant, or the operator
+  std::shared_ptr<const Expr> L, R;
+};
+
 struct Rule {
   std::string Name;
   // The assembly of each side, a line each, with the line it came from.
@@ -50,6 +68,9 @@ struct Rule {
   std::vector<Kept> Keep;
   // Whether only memory at and above SP must match, not the 32 KiB below it.
   bool AboveSP = false;
+  std::vector<RuleConst> Consts;
+  // What the rule assumes of its constants: each is not 0.
+  std::vector<std::shared_ptr<const Expr>> Assumes;
   std::string File;
   unsigned Line = 0;
   std::string where() const;
