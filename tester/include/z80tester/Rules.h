@@ -1,5 +1,5 @@
 // Rewrite rules, such as a compiler's peepholes: code before and after the
-// rewrite, and what must stay the same.
+// rewrite, the variables it is written over, and what may differ.
 
 #ifndef Z80TESTER_RULES_H
 #define Z80TESTER_RULES_H
@@ -7,83 +7,103 @@
 #include "z80core/Decoder.h"
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace z80tester {
 
-/// What a rule keeps: a register, a register pair, SP, all of F or one flag.
-enum class Kept {
-  A,
-  B,
-  C,
-  D,
-  E,
-  H,
-  L,
-  BC,
-  DE,
-  HL,
-  IX,
-  IY,
-  SP,
-  F,
-  SF,
-  ZF,
-  HF,
-  PVF,
-  NF,
-  CF
+/// A field of the CPU state, which both sides of a rule must leave the same
+/// unless the rule says it may differ.
+struct StateField {
+  const char *Name;
+  unsigned Bits;
 };
 
-const char *keptName(Kept K);
-unsigned keptBits(Kept K);
+/// The fields of the state that rules on C compare.
+llvm::ArrayRef<StateField> stateFields(z80core::Cpu C);
 
-/// A constant of a rule, which its code names as a symbol: any integer from
-/// Min to Max, of which the instructions read the low bits.
-struct RuleConst {
-  std::string Name;
-  int64_t Min = 0, Max = 0xFFFF;
-};
-
-/// An integer expression over a rule's constants, with C's operators.
+/// An expression over a rule's variables and the state it starts from, with
+/// C's operators. An Id is a variable, a field of the starting state in
+/// capitals, or a register; Text is an operand in quotes.
 struct Expr {
-  enum Kind { Num, Const, Unary, Binary };
+  enum Kind { Num, Id, Text, Unary, Binary, Call };
   Kind K = Num;
   int64_t Val = 0;
-  std::string Name; // the constant, or the operator
+  std::string Name; // the name, the operand, the operator or the function
   std::shared_ptr<const Expr> L, R;
+};
+
+/// A variable of a rule, of the type written in it: an operand that takes
+/// each of Choices in turn, or a number from Min to Max, which one proof
+/// covers.
+struct RuleVar {
+  std::string Name, Type;
+  bool Number = false;
+  std::vector<std::string> Choices;
+  int64_t Min = 0, Max = 0;
 };
 
 struct Rule {
   std::string Name;
+  std::vector<z80core::Cpu> Cpus; // none: the CPU of the command line
+  std::vector<RuleVar> Vars;
+  std::vector<std::shared_ptr<const Expr>> Conds;
   // The assembly of each side, a line each, with the line it came from.
   std::vector<std::pair<std::string, unsigned>> Before, After;
-  std::vector<Kept> Keep;
-  // Whether only memory at and above SP must match, not the 32 KiB below it.
-  bool AboveSP = false;
-  std::vector<RuleConst> Consts;
-  // What the rule assumes of its constants: each is not 0.
-  std::vector<std::shared_ptr<const Expr>> Assumes;
+  std::vector<std::string> Dead;
+  // Whether the 32 KiB below SP may differ.
+  bool DeadBelowSP = false;
   std::string File;
   unsigned Line = 0;
   std::string where() const;
 };
 
-llvm::Expected<std::vector<Rule>> loadRules(llvm::StringRef Path,
-                                            z80core::Cpu C);
+/// One case of a rule: its operand variables chosen and put in its code.
+struct RuleInstance {
+  const Rule *R = nullptr;
+  z80core::Cpu C = z80core::Cpu::Z80;
+  std::vector<std::pair<std::string, std::string>> Choice;
+  std::vector<std::pair<std::string, unsigned>> Before, After;
+  // The fields of stateFields(C) that both sides must leave the same.
+  std::vector<std::string> Compared;
+  bool AboveSP = false;
+  std::vector<RuleVar> Numbers;
+  // What the case assumes of the numbers and the starting state.
+  std::vector<std::shared_ptr<const Expr>> Assumes;
+  std::string choice() const;
+};
 
-/// The C names of the labels that start each side of rule I.
-std::string ruleLabel(size_t I, bool After);
+llvm::Expected<std::vector<Rule>> loadRules(llvm::StringRef Path);
 
-/// Assembly that puts each side of each rule at its label, ending in HALT.
-std::string rulesSource(llvm::ArrayRef<Rule> Rules);
+/// The CPUs to prove R on.
+std::vector<z80core::Cpu> ruleCpus(const Rule &R, z80core::Cpu Default);
+
+/// Whether a line of a case assembles on its own: the assembler's error if
+/// it does not. Its line in the rule file comes with it.
+using LineCheck = llvm::function_ref<std::optional<std::string>(
+    llvm::StringRef Text, unsigned Line)>;
+
+/// The cases of R on C whose conditions can hold, and whose lines assemble
+/// on their own if Assembles is given; AsmError gets the first error.
+llvm::Expected<std::vector<RuleInstance>>
+instantiate(const Rule &R, z80core::Cpu C, LineCheck Assembles = nullptr,
+            std::string *AsmError = nullptr);
+
+/// The C name of the label that starts a side of a case.
+std::string ruleLabel(bool After);
+
+/// Assembly that puts each side of I at its label, ending in HALT. Labels a
+/// side defines are its own; others are addresses past the code, the same on
+/// both sides.
+std::string instanceSource(const RuleInstance &I);
 
 } // namespace z80tester
 

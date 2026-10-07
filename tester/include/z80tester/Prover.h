@@ -41,10 +41,11 @@ llvm::Expected<ProofResult> prove(const TestPlan &P, const Contract &K,
                                   llvm::MemoryBufferRef Contracts,
                                   const ProofOptions &O);
 
-/// Proves that the code after rule I keeps what the rule lists, and memory,
-/// as the code before it does, for any registers, flags and memory. Img holds
-/// both sides at the labels that rulesSource gives them.
-llvm::Expected<ProofResult> proveRule(const Rule &R, size_t I, z80core::Cpu C,
+/// Proves that the code after a case of a rule leaves the fields it
+/// compares, and memory, as the code before it does, for any state and any
+/// values of its numbers that meet its assumptions. Img holds both sides at
+/// the labels that instanceSource gives them.
+llvm::Expected<ProofResult> proveRule(const RuleInstance &I,
                                       const z80core::Image &Img,
                                       const ProofOptions &O);
 

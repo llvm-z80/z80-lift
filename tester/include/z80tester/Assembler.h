@@ -11,6 +11,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -19,6 +20,14 @@
 #include <vector>
 
 namespace z80tester {
+
+/// A field of linked code that holds an undefined symbol's value plus Addend,
+/// which a linker only writes for a value from Min to Max.
+struct SymbolField {
+  std::string Symbol;
+  int64_t Addend = 0;
+  int64_t Min = 0, Max = 0;
+};
 
 /// Objects assembled from source files, linked on demand like an archive.
 class AsmLibrary {
@@ -41,10 +50,11 @@ public:
 
   /// Links the objects that define Roots, and those they need, from address 0.
   /// The symbols in Undefined may stay undefined; the bytes that hold their
-  /// values go to Image::SymbolBytes.
+  /// values go to Image::SymbolBytes, and the fields to Fields.
   llvm::Expected<z80core::Image>
   link(llvm::ArrayRef<std::string> Roots,
-       llvm::ArrayRef<std::string> Undefined = {}) const;
+       llvm::ArrayRef<std::string> Undefined = {},
+       std::vector<SymbolField> *Fields = nullptr) const;
 
 private:
   struct Object;

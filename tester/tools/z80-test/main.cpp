@@ -83,8 +83,13 @@ cl::opt<uint64_t> Seed("seed", cl::desc("Random seed"), cl::init(1),
 cl::opt<uint64_t> StepLimit("step-limit",
                             cl::desc("Instructions a call may run"),
                             cl::init(100000), cl::cat(Category));
-cl::opt<unsigned> Reports("reports", cl::desc("Failures to show per function"),
+cl::opt<unsigned> Reports("reports",
+                          cl::desc("Failures to show per function or rule"),
                           cl::init(10), cl::cat(Category));
+cl::opt<unsigned>
+    MaxFailures("max-failures",
+                cl::desc("Failing cases after which a rule stops, or 0"),
+                cl::init(0), cl::cat(Category));
 cl::opt<unsigned> SmtTimeout("smt-timeout",
                              cl::desc("Seconds for each query of a proof"),
                              cl::init(600), cl::cat(Category));
@@ -435,12 +440,6 @@ static std::string hex(uint64_t V, unsigned Bits) {
   return (Bits == 8 ? formatv("0x{0:x-2}", V) : formatv("0x{0:x-4}", V)).str();
 }
 
-static std::string keptValue(Kept K, uint64_t V) {
-  std::string Value =
-      keptBits(K) == 1 ? std::to_string(V) : hex(V, keptBits(K));
-  return (keptName(K) + Twine('=') + Value).str();
-}
-
 /// An argument of a counterexample, by name.
 static std::optional<uint64_t> exampleValue(const ProofResult &R,
                                             StringRef Name) {
@@ -502,10 +501,10 @@ static std::string startMemory(const ProofResult &R) {
   return join(Out, " ");
 }
 
-/// The values of a rule's constants in a counterexample.
-static std::string constValues(const Rule &R, const ProofResult &P) {
+/// The values of a case's numbers in a counterexample.
+static std::string numberValues(const RuleInstance &I, const ProofResult &P) {
   std::vector<std::string> Out;
-  for (const RuleConst &K : R.Consts) {
+  for (const RuleVar &K : I.Numbers) {
     std::optional<uint64_t> V = exampleValue(P, "const." + K.Name);
     std::string Text = "?";
     if (V && K.Min < 0)
@@ -517,137 +516,280 @@ static std::string constValues(const Rule &R, const ProofResult &P) {
   return join(Out, " ");
 }
 
-/// What one side of a rule returns, as Alive2 prints it: whether it got to
-/// its end, where it went if not, what the rule keeps and the byte at `at`.
-static std::optional<APInt> sideValue(StringRef Text, const Rule &R) {
+/// What one side of a case returns, as Alive2 prints it: whether it got to
+/// its end, where it went if not, the fields it compares and the byte at
+/// `at`.
+static std::optional<APInt> sideValue(StringRef Text, const RuleInstance &I) {
   unsigned Bits = 1 + 16 + 8;
-  for (Kept K : R.Keep)
-    Bits += keptBits(K);
+  for (const StateField &F : stateFields(I.C))
+    if (is_contained(I.Compared, F.Name))
+      Bits += F.Bits;
   if (!Text.consume_front("#x"))
     return std::nullopt;
   return APInt(Bits, Text.take_while(isHexDigit), 16);
 }
 
-/// Shows a side's value, with the byte at At if ShowByte.
-static std::string sideResult(const Rule &R, const APInt &V,
-                              std::optional<uint64_t> At, bool ShowByte) {
-  unsigned Bits = V.getBitWidth();
-  std::vector<std::string> Out;
-  unsigned Pos = Bits;
+/// What each side leaves that the other does not: where it went, the
+/// fields and the byte at At.
+static std::pair<std::string, std::string>
+sideResults(const RuleInstance &I, const APInt &Before, const APInt &After,
+            std::optional<uint64_t> At) {
+  std::vector<std::string> Out[2];
+  unsigned Pos = Before.getBitWidth();
   auto Take = [&](unsigned N) {
     Pos -= N;
-    return V.extractBitsAsZExtValue(N, Pos);
+    return std::pair(Before.extractBitsAsZExtValue(N, Pos),
+                     After.extractBitsAsZExtValue(N, Pos));
   };
-  bool Ended = Take(1);
-  uint64_t Exit = Take(16);
-  Out.reserve(R.Keep.size() + 2);
-  for (Kept K : R.Keep)
-    Out.push_back(keptValue(K, Take(keptBits(K))));
-  uint64_t Byte = Take(8);
-  if (At && ShowByte)
-    Out.push_back("(" + hex(*At, 16) + ")=" + hex(Byte, 8));
-  if (!Ended)
-    Out.push_back("leaves to " + hex(Exit, 16));
-  return join(Out, " ");
+  auto Differ = [&](uint64_t B, uint64_t A, auto Show) {
+    if (B != A) {
+      Out[0].push_back(Show(B));
+      Out[1].push_back(Show(A));
+    }
+  };
+  auto [EndedB, EndedA] = Take(1);
+  auto [ExitB, ExitA] = Take(16);
+  if (EndedB != EndedA || (!EndedB && ExitB != ExitA))
+    for (bool Side : {false, true})
+      Out[Side].push_back((Side ? EndedA : EndedB)
+                              ? "ran to the end"
+                              : "leaves to " + hex(Side ? ExitA : ExitB, 16));
+  for (const std::string &Field : I.Compared) {
+    unsigned Bits = 0;
+    for (const StateField &F : stateFields(I.C))
+      if (Field == F.Name)
+        Bits = F.Bits;
+    auto [B, A] = Take(Bits);
+    Differ(B, A, [&](uint64_t V) {
+      return Field + "=" + (Bits == 1 ? std::to_string(V) : hex(V, Bits));
+    });
+  }
+  auto [B, A] = Take(8);
+  Differ(B, A, [&](uint64_t V) {
+    return "(" + (At ? hex(*At, 16) : std::string("?")) + ")=" + hex(V, 8);
+  });
+  return {join(Out[0], " "), join(Out[1], " ")};
+}
+
+/// Assembles and links a case of a rule; fails with what the assembler says
+/// for a case whose code does not assemble. The case gains the assumption
+/// that each number fits the fields it is written to.
+static Expected<Image> assembleCase(RuleInstance &I, bool &Assembles) {
+  Assembles = false;
+  SmallString<128> Tmp;
+  int FD;
+  if (std::error_code EC =
+          sys::fs::createTemporaryFile("z80-test-rule", "s", FD, Tmp))
+    return createStringError(EC, "cannot create a temporary file: %s",
+                             EC.message().c_str());
+  FileRemover Remove(Tmp);
+  {
+    raw_fd_ostream OS(FD, /*shouldClose=*/true);
+    OS << instanceSource(I);
+  }
+  Expected<AsmLibrary> Lib = AsmLibrary::assemble(I.C, {Tmp.str().str()});
+  if (!Lib)
+    return Lib.takeError();
+  Assembles = true;
+  std::vector<std::string> Numbers;
+  Numbers.reserve(I.Numbers.size());
+  for (const RuleVar &K : I.Numbers)
+    Numbers.push_back(K.Name);
+  std::vector<SymbolField> Fields;
+  Expected<Image> Img =
+      Lib->link({ruleLabel(false), ruleLabel(true)}, Numbers, &Fields);
+  if (!Img) {
+    // The object is named after the temporary file.
+    std::string Msg = toString(Img.takeError());
+    StringRef TmpName = sys::path::filename(Tmp);
+    for (size_t At; (At = Msg.find(TmpName)) != std::string::npos;)
+      Msg.replace(At, TmpName.size(), I.R->where());
+    return createStringError("%s", Msg.c_str());
+  }
+  auto Node = [](Expr::Kind K, std::string Name, int64_t V = 0,
+                 std::shared_ptr<const Expr> L = nullptr,
+                 std::shared_ptr<const Expr> R = nullptr) {
+    auto E = std::make_shared<Expr>();
+    E->K = K;
+    E->Name = std::move(Name);
+    E->Val = V;
+    E->L = std::move(L);
+    E->R = std::move(R);
+    return E;
+  };
+  std::set<std::tuple<std::string, int64_t, int64_t, int64_t>> Seen;
+  for (const SymbolField &F : Fields) {
+    if (!Seen.insert({F.Symbol, F.Addend, F.Min, F.Max}).second)
+      continue;
+    auto V = Node(Expr::Binary, "+", 0, Node(Expr::Id, F.Symbol),
+                  Node(Expr::Num, "", F.Addend));
+    I.Assumes.push_back(
+        Node(Expr::Binary, "&&", 0,
+             Node(Expr::Binary, "<=", 0, Node(Expr::Num, "", F.Min), V),
+             Node(Expr::Binary, "<=", 0, V, Node(Expr::Num, "", F.Max))));
+  }
+  return Img;
+}
+
+/// Shows a counterexample of a case.
+static void showCounterexample(const RuleInstance &I, const ProofResult &P) {
+  if (!I.Choice.empty())
+    outs() << "  case    " << I.choice() << '\n';
+  WithColor(outs(), raw_ostream::RED) << "  Alive2: " << P.Verdict << '\n';
+  outs() << "  from    " << startState(I.C, P) << "\n          "
+         << startMemory(P) << '\n';
+  if (!I.Numbers.empty())
+    outs() << "  number  " << numberValues(I, P) << '\n';
+  std::optional<APInt> Before = sideValue(P.SourceValue, I);
+  std::optional<APInt> After = sideValue(P.TargetValue, I);
+  if (Before && After) {
+    auto [B, A] = sideResults(I, *Before, *After, exampleValue(P, "at"));
+    outs() << "  before  " << B << "\n  after   " << A << '\n';
+  }
 }
 
 static int runRules() {
-  Cpu C = CpuFlag;
-  std::vector<Rule> All = check(loadRules(InputPath, C));
-  std::vector<Rule> Rules;
+  std::vector<Rule> All = check(loadRules(InputPath));
+  std::vector<const Rule *> Rules;
   if (Names.empty())
-    Rules = All;
+    for (const Rule &R : All)
+      Rules.push_back(&R);
   for (const std::string &Name : Names) {
     auto It = llvm::find_if(All, [&](const Rule &R) { return R.Name == Name; });
     if (It == All.end())
       fail(createStringError("no rule %s", Name.c_str()));
-    Rules.push_back(*It);
+    Rules.push_back(&*It);
   }
-
-  // The assembler reads the rules from a file.
-  SmallString<128> Tmp;
-  int FD;
-  if (std::error_code EC =
-          sys::fs::createTemporaryFile("z80-test-rules", "s", FD, Tmp))
-    fail(createStringError(EC, "cannot create a temporary file: %s",
-                           EC.message().c_str()));
-  FileRemover Remove(Tmp);
-  {
-    raw_fd_ostream OS(FD, /*shouldClose=*/true);
-    OS << rulesSource(Rules);
-  }
-  Expected<AsmLibrary> Lib = AsmLibrary::assemble(C, {Tmp.str().str()});
-  if (!Lib) {
-    consumeError(Lib.takeError());
-    fail(createStringError("%s: does not assemble", InputPath.c_str()));
-  }
-  std::vector<std::string> Roots, Consts;
-  for (size_t I = 0; I < Rules.size(); ++I) {
-    for (bool After : {false, true})
-      Roots.push_back(ruleLabel(I, After));
-    for (const RuleConst &K : Rules[I].Consts)
-      Consts.push_back(K.Name);
-  }
-  Expected<Image> Linked = Lib->link(Roots, Consts);
-  if (!Linked) {
-    // The object is named after the temporary file.
-    std::string Msg = toString(Linked.takeError());
-    StringRef TmpName = sys::path::filename(Tmp);
-    for (size_t At; (At = Msg.find(TmpName)) != std::string::npos;)
-      Msg.replace(At, TmpName.size(), sys::path::filename(InputPath));
-    fail(createStringError("%s", Msg.c_str()));
-  }
-  Image Img = std::move(*Linked);
 
   ProofOptions PO;
   PO.Timeout = SmtTimeout;
   PO.Memory = SmtMemory;
 
   size_t Width = 16;
-  for (const Rule &R : Rules)
-    Width = std::max(Width, R.Name.size());
+  for (const Rule *R : Rules)
+    Width = std::max(Width, R->Name.size() + 7);
   bool AllOk = true;
-  for (size_t I = 0; I < Rules.size(); ++I) {
-    const Rule &R = Rules[I];
-    outs() << left_justify(R.Name, Width) << "  ";
-    outs().flush();
-    Expected<ProofResult> P = proveRule(R, I, C, Img, PO);
-    if (!P) {
-      AllOk = false;
-      status(false);
-      outs() << '\n';
-      WithColor(outs(), raw_ostream::RED)
-          << "  " << toString(P.takeError()) << '\n';
+  for (const Rule *R : Rules)
+    for (Cpu C : ruleCpus(*R, CpuFlag)) {
+      std::string Title = R->Name;
+      if (R->Cpus.size() > 1)
+        Title += " (" + std::string(cpuName(C)) + ")";
+      outs() << left_justify(Title, Width) << "  ";
       outs().flush();
-      continue;
-    }
-    bool Ok = P->S == ProofResult::Proved;
-    AllOk &= Ok;
-    status(Ok);
-    if (Ok) {
-      outs() << formatv("  proved in {0:f1} s\n", P->Seconds);
-    } else if (P->S == ProofResult::Unproven) {
-      outs() << formatv("  not proved after {0:f1} s\n", P->Seconds);
-      WithColor(outs(), raw_ostream::YELLOW)
-          << "  Alive2: " << P->Verdict << '\n';
-    } else {
-      outs() << "  counterexample\n";
-      WithColor(outs(), raw_ostream::RED) << "  Alive2: " << P->Verdict << '\n';
-      outs() << "  from    " << startState(C, *P) << "\n          "
-             << startMemory(*P) << '\n';
-      if (!R.Consts.empty())
-        outs() << "  const   " << constValues(R, *P) << '\n';
-      std::optional<APInt> Before = sideValue(P->SourceValue, R);
-      std::optional<APInt> After = sideValue(P->TargetValue, R);
-      if (Before && After) {
-        std::optional<uint64_t> At = exampleValue(*P, "at");
-        bool ShowByte = Before->trunc(8) != After->trunc(8);
-        outs() << "  before  " << sideResult(R, *Before, At, ShowByte)
-               << "\n  after   " << sideResult(R, *After, At, ShowByte) << '\n';
+      auto Fail = [&](const Twine &Msg) {
+        AllOk = false;
+        status(false);
+        outs() << '\n';
+        WithColor(outs(), raw_ostream::RED) << "  " << Msg << '\n';
+        outs().flush();
+      };
+
+      std::string NotAssembled;
+      Expected<std::vector<RuleInstance>> Cases = instantiate(
+          *R, C,
+          [&](StringRef Text, unsigned Line) -> std::optional<std::string> {
+            Rule One;
+            One.File = R->File;
+            One.Before = {{Text.str(), Line}};
+            RuleInstance I;
+            I.R = &One;
+            I.C = C;
+            I.Before = One.Before;
+            bool Assembles;
+            Expected<Image> Img = assembleCase(I, Assembles);
+            if (Assembles) {
+              consumeError(Img.takeError());
+              return std::nullopt;
+            }
+            return toString(Img.takeError());
+          },
+          &NotAssembled);
+      if (!Cases) {
+        Fail(toString(Cases.takeError()));
+        continue;
       }
+      if (Cases->empty()) {
+        Fail(NotAssembled.empty() ? "no case meets the conditions"
+                                  : "no case assembles: " + NotAssembled);
+        continue;
+      }
+      size_t Proved = 0, Failed = 0, Unproven = 0;
+      double Seconds = 0;
+      std::string Error;
+      std::vector<std::pair<const RuleInstance *, ProofResult>> Shown;
+      bool Stopped = false;
+      for (RuleInstance &I : *Cases) {
+        bool Assembles;
+        Expected<Image> Img = assembleCase(I, Assembles);
+        if (!Img) {
+          std::string Msg = toString(Img.takeError());
+          if (Assembles) {
+            Error = Msg;
+            break;
+          }
+          if (NotAssembled.empty())
+            NotAssembled = (I.choice().empty() ? "" : I.choice() + ": ") + Msg;
+          continue;
+        }
+        // A case whose code cannot be lifted, such as one with I/O or a
+        // loop, is one that is not proved.
+        ProofResult R;
+        if (Expected<ProofResult> P = proveRule(I, *Img, PO))
+          R = std::move(*P);
+        else
+          R.Verdict = toString(P.takeError());
+        Seconds += R.Seconds;
+        if (R.S == ProofResult::Proved) {
+          ++Proved;
+          continue;
+        }
+        bool Example = R.S == ProofResult::Counterexample;
+        ++(Example ? Failed : Unproven);
+        Stopped = MaxFailures && Failed == MaxFailures;
+        // Counterexamples first, then a case that was not proved.
+        if (Example && !Shown.empty() &&
+            Shown[0].second.S != ProofResult::Counterexample)
+          Shown.clear();
+        if ((Example || Shown.empty()) && Shown.size() < Reports)
+          Shown.push_back({&I, std::move(R)});
+        if (Stopped)
+          break;
+      }
+
+      if (!Error.empty()) {
+        Fail(Error);
+        continue;
+      }
+      if (Failed) {
+        AllOk = false;
+        status(false);
+        outs() << formatv("  counterexample in {0}{1} of {2} cases",
+                          Stopped ? "at least " : "", Failed,
+                          Stopped ? Cases->size() : Proved + Failed + Unproven);
+        if (Unproven)
+          outs() << formatv(", {0} not proved", Unproven);
+        outs() << '\n';
+        for (const auto &[I, P] : Shown)
+          showCounterexample(*I, P);
+      } else if (Unproven) {
+        AllOk = false;
+        status(false);
+        outs() << formatv("  {0} of {1} cases not proved\n", Unproven,
+                          Proved + Unproven);
+        if (!Shown[0].first->Choice.empty())
+          outs() << "  case    " << Shown[0].first->choice() << '\n';
+        WithColor(outs(), raw_ostream::YELLOW)
+            << "  reason  " << Shown[0].second.Verdict << '\n';
+      } else if (!Proved) {
+        Fail("no case assembles: " + NotAssembled);
+        continue;
+      } else {
+        status(true);
+        outs() << formatv("  proved {0} case{1} in {2:f1} s\n", Proved,
+                          Proved == 1 ? "" : "s", Seconds);
+      }
+      outs().flush();
     }
-    outs().flush();
-  }
   return AllOk ? 0 : 1;
 }
 #endif

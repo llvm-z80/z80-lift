@@ -54,6 +54,16 @@ assembleFile(const Target &T, const Triple &TT, StringRef Path) {
   std::unique_ptr<MCSubtargetInfo> STI(T.createMCSubtargetInfo(TT, "", ""));
   std::unique_ptr<MCInstrInfo> MII(T.createMCInstrInfo());
   MCContext Ctx(TT, *MAI, *MRI, *STI, &SrcMgr);
+  // The first error, for the message, rather than every error on stderr.
+  // The parser gives the context errors at the line markers' lines.
+  std::string Diag;
+  Ctx.setDiagnosticHandler([&](const SMDiagnostic &D, bool, const SourceMgr &,
+                               std::vector<const MDNode *> &) {
+    if (Diag.empty() && D.getKind() == SourceMgr::DK_Error) {
+      raw_string_ostream OS(Diag);
+      D.print(nullptr, OS, /*ShowColors=*/false);
+    }
+  });
   std::unique_ptr<MCObjectFileInfo> MOFI(
       T.createMCObjectFileInfo(Ctx, /*PIC=*/false));
   Ctx.setObjectFileInfo(MOFI.get());
@@ -69,8 +79,10 @@ assembleFile(const Target &T, const Triple &TT, StringRef Path) {
   std::unique_ptr<MCTargetAsmParser> TAP(
       T.createMCAsmParser(*STI, *Parser, *MII));
   Parser->setTargetParser(*TAP);
-  if (Parser->Run(/*NoInitialTextSection=*/false))
-    return createStringError("%s: does not assemble", Path.str().c_str());
+  if (Parser->Run(/*NoInitialTextSection=*/false) || !Diag.empty())
+    return createStringError(
+        "%s", Diag.empty() ? (Path + ": does not assemble").str().c_str()
+                           : StringRef(Diag).rtrim().str().c_str());
   return MemoryBuffer::getMemBufferCopy(StringRef(Out.data(), Out.size()),
                                         Path);
 }
@@ -80,20 +92,44 @@ static void write16(uint8_t *Loc, uint64_t V) {
   Loc[1] = V >> 8;
 }
 
+/// The values a relocation that is not PC-relative takes, as lld's Z80 port
+/// checks them; none for one that takes any.
+static std::optional<std::pair<int64_t, int64_t>> valueRange(uint32_t Type) {
+  auto Bits = [](unsigned N) {
+    return std::pair(-(int64_t(1) << (N - 1)), (int64_t(1) << N) - 1);
+  };
+  switch (Type) {
+  case ELF::R_Z80_IMM8:
+  case ELF::R_Z80_ADDR8: return Bits(8);
+  case ELF::R_Z80_ADDR16:
+  case ELF::R_Z80_IMM16:
+  case ELF::R_Z80_ADDR24_SEGMENT:
+  case ELF::R_Z80_ADDR_ASCIZ: return Bits(16);
+  case ELF::R_Z80_ADDR24: return Bits(24);
+  case ELF::R_Z80_ADDR13: return std::pair(0, 0x1FFF);
+  case ELF::R_Z80_DISP8: return std::pair(-0x80, 0x7F);
+  case ELF::R_SM83_LDH8: return std::pair(0xFF00, 0xFFFF);
+  default: return std::nullopt;
+  }
+}
+
 /// Applies a relocation as lld's Z80 port does. V is S + A, less P for the
 /// PC-relative ones.
 static bool relocate(uint8_t *Loc, uint32_t Type, int64_t V) {
-  auto Fits = [&](unsigned Bits) {
-    return isIntN(Bits, V) || isUIntN(Bits, V);
+  auto Fits = [&] {
+    auto R = valueRange(Type);
+    return !R || (R->first <= V && V <= R->second);
   };
   switch (Type) {
   case ELF::R_Z80_NONE: return true;
   case ELF::R_Z80_IMM8:
-  case ELF::R_Z80_ADDR8: *Loc = V; return Fits(8);
+  case ELF::R_Z80_ADDR8:
+  case ELF::R_Z80_DISP8: *Loc = V; return Fits();
   case ELF::R_Z80_ADDR16:
   case ELF::R_Z80_IMM16:
   case ELF::R_Z80_ADDR24_SEGMENT:
-  case ELF::R_Z80_ADDR_ASCIZ: write16(Loc, V); return Fits(16);
+  case ELF::R_Z80_ADDR_ASCIZ:
+  case ELF::R_Z80_ADDR13: write16(Loc, V); return Fits();
   case ELF::R_Z80_ADDR16_LO:
   case ELF::R_Z80_ADDR24_SEGMENT_LO: *Loc = V; return true;
   case ELF::R_Z80_ADDR16_HI:
@@ -103,11 +139,9 @@ static bool relocate(uint8_t *Loc, uint32_t Type, int64_t V) {
   case ELF::R_Z80_ADDR24:
     write16(Loc, V);
     Loc[2] = V >> 16;
-    return Fits(24);
+    return Fits();
   case ELF::R_Z80_ADDR24_BANK: *Loc = V >> 16; return true;
-  case ELF::R_Z80_ADDR13: write16(Loc, V); return isUIntN(13, V);
-  case ELF::R_Z80_DISP8: *Loc = V; return isIntN(8, V);
-  case ELF::R_SM83_LDH8: *Loc = V - 0xFF00; return isUIntN(8, V - 0xFF00);
+  case ELF::R_SM83_LDH8: *Loc = V - 0xFF00; return Fits();
   case ELF::R_Z80_FK_DATA_4:
   case ELF::R_Z80_FK_DATA_8:
     for (unsigned I = 0; I < (Type == ELF::R_Z80_FK_DATA_4 ? 4 : 8); ++I)
@@ -296,7 +330,8 @@ AsmLibrary::pick(std::vector<size_t> Work,
 }
 
 Expected<Image> AsmLibrary::link(ArrayRef<std::string> Roots,
-                                 ArrayRef<std::string> Undefined) const {
+                                 ArrayRef<std::string> Undefined,
+                                 std::vector<SymbolField> *Fields) const {
   std::vector<size_t> Work;
   for (const std::string &R : Roots) {
     std::optional<size_t> I = definer(R);
@@ -439,6 +474,8 @@ Expected<Image> AsmLibrary::link(ArrayRef<std::string> Roots,
             Img.Mem[P + Off] = 0;
             Img.SymbolBytes[uint16_t(P + Off)] = {Unknown, *Addend, Shift};
           }
+          if (auto R = valueRange(Type); R && Fields)
+            Fields->push_back({Unknown, *Addend, R->first, R->second});
           continue;
         }
         V += *Addend;

@@ -303,65 +303,12 @@ const StartField StartFields[] = {
 
 } // namespace
 
-/// Where each flag sits in F.
-static unsigned flagBit(Cpu C, Kept K) {
-  if (C == Cpu::SM83)
-    switch (K) {
-    case Kept::ZF: return 7;
-    case Kept::NF: return 6;
-    case Kept::HF: return 5;
-    default: return 4;
-    }
-  switch (K) {
-  case Kept::SF: return 7;
-  case Kept::ZF: return 6;
-  case Kept::HF: return 4;
-  case Kept::PVF: return 2;
-  case Kept::NF: return 1;
-  default: return 0;
-  }
-}
-
-static size_t flagOffset(Kept K) {
-  switch (K) {
-  case Kept::SF: return offsetof(State, SF);
-  case Kept::ZF: return offsetof(State, ZF);
-  case Kept::HF: return offsetof(State, HF);
-  case Kept::PVF: return offsetof(State, PVF);
-  case Kept::NF: return offsetof(State, NF);
-  default: return offsetof(State, CF);
-  }
-}
-
-static Value *kept(Call &S, Cpu C, Kept K) {
-  IRBuilder<> &B = S.B;
-  switch (K) {
-  case Kept::A: return S.reg(Reg::A);
-  case Kept::B: return S.reg(Reg::B);
-  case Kept::C: return S.reg(Reg::C);
-  case Kept::D: return S.reg(Reg::D);
-  case Kept::E: return S.reg(Reg::E);
-  case Kept::H: return S.reg(Reg::H);
-  case Kept::L: return S.reg(Reg::L);
-  case Kept::BC: return S.reg(Reg::BC);
-  case Kept::DE: return S.reg(Reg::DE);
-  case Kept::HL: return S.reg(Reg::HL);
-  case Kept::IX: return S.reg(Reg::IX);
-  case Kept::IY: return S.reg(Reg::IY);
-  case Kept::SP: return S.reg(Reg::SP);
-  case Kept::F: {
-    Value *F = B.getInt8(0);
-    for (Kept Flag :
-         {Kept::SF, Kept::ZF, Kept::HF, Kept::PVF, Kept::NF, Kept::CF}) {
-      if (C == Cpu::SM83 && (Flag == Kept::SF || Flag == Kept::PVF))
-        continue;
-      F = B.CreateOr(F,
-                     B.CreateShl(S.load8(flagOffset(Flag)), flagBit(C, Flag)));
-    }
-    return F;
-  }
-  default: return B.CreateTrunc(S.load8(flagOffset(K)), B.getInt1Ty());
-  }
+/// The field of the start state named Name.
+static const StartField &startField(StringRef Name) {
+  for (const StartField &F : StartFields)
+    if (Name == F.Name)
+      return F;
+  llvm_unreachable("not a field of the state");
 }
 
 namespace {
@@ -390,11 +337,11 @@ static MemoryParams memoryParams(Function &F, unsigned Cells) {
   return P;
 }
 
-/// Builds one side of rule I: runs its code from the state in the
+/// Builds one side of a case of a rule: runs its code from the state in the
 /// parameters and returns whether it got to the end, where it went if not,
-/// what the rule keeps, the first value in the highest bits, and the byte at
-/// `at`.
-static Function *buildSide(Module &M, Cpu C, const Rule &R, StringRef Name,
+/// the fields it compares, the first value in the highest bits, and the byte
+/// at `at`.
+static Function *buildSide(Module &M, const RuleInstance &I, StringRef Name,
                            FunctionType *FT, Function *Lifted, uint16_t Entry,
                            GlobalVariable *Mem, unsigned Cells) {
   LLVMContext &Ctx = M.getContext();
@@ -436,12 +383,16 @@ static Function *buildSide(Module &M, Cpu C, const Rule &R, StringRef Name,
     V = B.CreateOr(B.CreateShl(V, Bits), B.CreateZExt(Part, RT));
   };
   Append(Exit);
-  for (Kept K : R.Keep)
-    Append(kept(S, C, K));
+  for (const std::string &Field : I.Compared) {
+    const StartField &SF = startField(Field);
+    Value *V =
+        B.CreateLoad(B.getIntNTy(SF.Bits == 16 ? 16 : 8), S.field(SF.Off));
+    Append(SF.Bits == 1 ? B.CreateTrunc(V, B.getInt1Ty()) : V);
+  }
   Value *At = B.CreateFreeze(P.At);
   Value *Byte =
       B.CreateLoad(I8, B.CreateInBoundsGEP(I8, Mem, B.CreateZExt(At, I64)));
-  if (R.AboveSP) {
+  if (I.AboveSP) {
     // The 32 KiB below SP, where interrupts may write, need not match.
     Value *Below =
         B.CreateICmpSLT(B.CreateSub(At, S.reg(Reg::SP)), B.getInt16(0));
@@ -561,17 +512,38 @@ static std::string constParam(StringRef Name) {
   return ("const." + Name).str();
 }
 
-/// The value of E, with the constants in Consts.
+/// The value of E, which names the numbers in Numbers and the fields of the
+/// start state in Start.
 static Value *exprValue(IRBuilder<> &B, const Expr &E,
-                        const StringMap<Value *> &Consts) {
+                        const StringMap<Value *> &Numbers,
+                        const StringMap<Value *> &Start) {
   Type *I64 = B.getInt64Ty();
   Value *Zero = B.getInt64(0);
   auto Bool = [&](Value *V) { return B.CreateZExt(V, I64); };
+  auto Field = [&](StringRef Name) {
+    return B.CreateZExt(Start.lookup(Name), I64);
+  };
   switch (E.K) {
   case Expr::Num: return B.getInt64(E.Val);
-  case Expr::Const: return B.CreateSExt(Consts.lookup(E.Name), I64);
+  case Expr::Id: {
+    if (Value *V = Numbers.lookup(E.Name))
+      return B.CreateSExt(V, I64);
+    static const std::pair<StringRef, std::pair<StringRef, StringRef>> Pairs[] =
+        {{"BC", {"B", "C"}},
+         {"DE", {"D", "E"}},
+         {"HL", {"H", "L"}},
+         {"IX", {"IXH", "IXL"}},
+         {"IY", {"IYH", "IYL"}}};
+    for (auto [Pair, Halves] : Pairs)
+      if (E.Name == Pair)
+        return B.CreateOr(B.CreateShl(Field(Halves.first), 8),
+                          Field(Halves.second));
+    return Field(E.Name);
+  }
+  case Expr::Text:
+  case Expr::Call: llvm_unreachable("an operand left in an assumption");
   case Expr::Unary: {
-    Value *V = exprValue(B, *E.L, Consts);
+    Value *V = exprValue(B, *E.L, Numbers, Start);
     if (E.Name == "-")
       return B.CreateNeg(V);
     if (E.Name == "~")
@@ -580,7 +552,8 @@ static Value *exprValue(IRBuilder<> &B, const Expr &E,
   }
   case Expr::Binary: break;
   }
-  Value *L = exprValue(B, *E.L, Consts), *R = exprValue(B, *E.R, Consts);
+  Value *L = exprValue(B, *E.L, Numbers, Start),
+        *R = exprValue(B, *E.R, Numbers, Start);
   StringRef Op = E.Name;
   if (Op == "/" || Op == "%") {
     // Dividing by 0 gives 0 rather than undefined behaviour.
@@ -618,13 +591,17 @@ static Value *exprValue(IRBuilder<> &B, const Expr &E,
   llvm_unreachable("an operator the parser does not make");
 }
 
-/// Replaces the calls that stand for the values of R's constants with F's
-/// parameters for them. In Src, also assumes what R says of them.
-static Error bindConstants(const Rule &R, Function &F, bool Src) {
-  StringMap<Value *> Consts;
+/// Replaces the calls that stand for the values of I's numbers with F's
+/// parameters for them. In Src, also assumes what I says of them and of the
+/// start state.
+static Error bindConstants(const RuleInstance &I, Function &F, bool Src) {
+  StringMap<Value *> Consts, Start;
   for (Argument &A : F.args())
     if (StringRef N = A.getName(); N.consume_front(constParam("")))
       Consts[N] = &A;
+    else
+      Start[A.getName()] = &A;
+  const Rule &R = *I.R;
   for (Instruction &I : make_early_inc_range(instructions(F))) {
     auto *CI = dyn_cast<CallInst>(&I);
     Function *Callee = CI ? CI->getCalledFunction() : nullptr;
@@ -645,13 +622,14 @@ static Error bindConstants(const Rule &R, Function &F, bool Src) {
   if (!Src)
     return Error::success();
   IRBuilder<> B(&*F.getEntryBlock().getFirstInsertionPt());
-  for (const RuleConst &K : R.Consts) {
+  for (const RuleVar &K : I.Numbers) {
     Value *V = B.CreateSExt(Consts.lookup(K.Name), B.getInt64Ty());
     B.CreateAssumption(B.CreateAnd(B.CreateICmpSGE(V, B.getInt64(K.Min)),
                                    B.CreateICmpSLE(V, B.getInt64(K.Max))));
   }
-  for (const auto &E : R.Assumes)
-    B.CreateAssumption(B.CreateICmpNE(exprValue(B, *E, Consts), B.getInt64(0)));
+  for (const auto &E : I.Assumes)
+    B.CreateAssumption(
+        B.CreateICmpNE(exprValue(B, *E, Consts, Start), B.getInt64(0)));
   return Error::success();
 }
 
@@ -740,7 +718,7 @@ struct Sides {
 
 } // namespace
 
-static Expected<Sides> buildSides(const Module &Lifted, const Rule &R, Cpu C,
+static Expected<Sides> buildSides(const Module &Lifted, const RuleInstance &I,
                                   const Image &Img,
                                   const std::array<uint16_t, 2> &Entry,
                                   unsigned Cells) {
@@ -764,23 +742,25 @@ static Expected<Sides> buildSides(const Module &Lifted, const Rule &R, Cpu C,
     Params.push_back(Type::getInt8Ty(Ctx));
   }
   unsigned FirstConst = Params.size();
-  Params.insert(Params.end(), R.Consts.size(), Type::getInt32Ty(Ctx));
+  Params.insert(Params.end(), I.Numbers.size(), Type::getInt32Ty(Ctx));
   unsigned Bits = 1 + 16 + 8;
-  for (Kept K : R.Keep)
-    Bits += keptBits(K);
+  for (const std::string &Field : I.Compared)
+    Bits += startField(Field).Bits;
   FunctionType *FT =
       FunctionType::get(Type::getIntNTy(Ctx, Bits), Params, false);
   for (bool After : {false, true}) {
-    S.F[After] = buildSide(*S.M, C, R, After ? "tgt" : "src", FT,
+    S.F[After] = buildSide(*S.M, I, After ? "tgt" : "src", FT,
                            S.M->getFunction(Img.nameAt(Entry[After])),
                            Entry[After], S.Mem, Cells);
-    for (size_t K = 0; K < R.Consts.size(); ++K)
-      S.F[After]->getArg(FirstConst + K)->setName(constParam(R.Consts[K].Name));
+    for (size_t K = 0; K < I.Numbers.size(); ++K)
+      S.F[After]
+          ->getArg(FirstConst + K)
+          ->setName(constParam(I.Numbers[K].Name));
   }
   if (Error E = simplify(*S.M, S.F[0], S.F[1]))
     return std::move(E);
   for (bool After : {false, true})
-    if (Error E = bindConstants(R, *S.F[After], !After))
+    if (Error E = bindConstants(I, *S.F[After], !After))
       return std::move(E);
   return S;
 }
@@ -946,11 +926,12 @@ Expected<ProofResult> z80tester::prove(const TestPlan &P, const Contract &K,
   return R;
 }
 
-Expected<ProofResult> z80tester::proveRule(const Rule &R, size_t I, Cpu C,
+Expected<ProofResult> z80tester::proveRule(const RuleInstance &I,
                                            const Image &Img,
                                            const ProofOptions &O) {
+  const Rule &R = *I.R;
   LLVMContext Ctx;
-  auto L = z80lift::Lifter::create(C, Img, Ctx);
+  auto L = z80lift::Lifter::create(I.C, Img, Ctx);
   if (!L)
     return L.takeError();
   // Each side is at its own address, so a return to the address after a
@@ -962,7 +943,7 @@ Expected<ProofResult> z80tester::proveRule(const Rule &R, size_t I, Cpu C,
       "the rule's code has a loop, which a proof cannot follow";
   std::array<uint16_t, 2> Entry;
   for (bool After : {false, true}) {
-    std::optional<uint16_t> A = Img.lookup(ruleLabel(I, After));
+    std::optional<uint16_t> A = Img.lookup(ruleLabel(After));
     if (!A)
       return createStringError("%s: rule %s is not in the image",
                                R.where().c_str(), R.Name.c_str());
@@ -975,7 +956,7 @@ Expected<ProofResult> z80tester::proveRule(const Rule &R, size_t I, Cpu C,
 
   // Once inlined, code without loops runs each load at most once, so a cell
   // for every byte loaded lets memory be anything the code can read.
-  Expected<Sides> Probe = buildSides(*Lifted, R, C, Img, Entry, 0);
+  Expected<Sides> Probe = buildSides(*Lifted, I, Img, Entry, 0);
   if (!Probe)
     return Probe.takeError();
   unsigned Cells = 0;
@@ -987,7 +968,7 @@ Expected<ProofResult> z80tester::proveRule(const Rule &R, size_t I, Cpu C,
         Cells += Lifted->getDataLayout().getTypeStoreSize(LI->getType());
   }
 
-  Expected<Sides> S = buildSides(*Lifted, R, C, Img, Entry, Cells);
+  Expected<Sides> S = buildSides(*Lifted, I, Img, Entry, Cells);
   if (!S)
     return S.takeError();
   for (Function *F : S->F)
